@@ -1,0 +1,9 @@
+[package]
+name = "rust_quicklog"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4.39"
+rouille = "3.6.2"
+serde = { version = "1.0.217", features = ["derive"] }
