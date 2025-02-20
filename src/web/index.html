@@ -60,10 +60,17 @@
   </div>
 
   <script>
+    let click_waiting = false;
+
     document.getElementById('submitBtn').addEventListener('click', function () {
+      if (click_waiting) {
+        return;
+      }
+
       const textbox = document.getElementById('textbox');
       textbox.focus();
       textbox.scrollIntoView();
+      click_waiting = true;
 
       // Make an HTTPS POST request
       fetch('https://example.com', {
@@ -81,10 +88,12 @@
           textbox.value = "";
           textbox.focus();
           textbox.scrollIntoView();
+          click_waiting = false;
         })
         .catch((error) => {
           console.error('Error:', error);
           alert('An error occurred!');
+          click_waiting = false;
         });
     });
   </script>
