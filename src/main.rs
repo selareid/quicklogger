@@ -10,7 +10,8 @@ fn main() {
     let web_addr = "0.0.0.0:7489";
     let ext_addr = "extaddr.example.com";
 
-    let index_html = INDEX_HTML.replace("example.com", &ext_addr);
+    let index_html = if cfg!(debug_assertions) { INDEX_HTML.replace("example.com", &ext_addr) }
+                        else { INDEX_HTML.replace("example.com", &ext_addr).replace("<script>eruda.init();</script>", "") };
 
     rouille::start_server(web_addr, move |req| {
         println!("Got a request\n {:?}", req);
