@@ -1,7 +1,12 @@
 use chrono::{Datelike, Utc};
 use rouille::Response;
 use serde::Deserialize;
-use std::{fs::OpenOptions, io::Write};
+use std::{
+    collections::HashSet,
+    fs::{self, OpenOptions},
+    io::{Read, Write},
+    sync::Arc,
+};
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 const LOGS_PATH: &str = "./logs";
@@ -12,6 +17,7 @@ fn main() {
 
     let index_html = if cfg!(debug_assertions) { INDEX_HTML.replace("example.com", &ext_addr) }
                         else { INDEX_HTML.replace("example.com", &ext_addr).replace("<script>eruda.init();</script>", "") };
+    let tags_arc: Arc<HashSet<String>> = Arc::new(load_tags().expect("Error while loading tags."));
 
     rouille::start_server(web_addr, move |req| {
         println!("Got a request\n {:?}", req);
@@ -20,6 +26,11 @@ fn main() {
             (GET) (/) => {
                 // rouille::Response::text("Go away").with_status_code(200)
                 Response::html(&index_html)
+            },
+            (GET) (/tags) => {
+                // respond with list of tags
+                let t_v: Vec<String> = tags_arc.iter().map(|s| s.clone()).collect();
+                Response::text(t_v.join(", "))
             },
             (POST) (/) => {
                 // Response::empty_204()
@@ -33,6 +44,13 @@ fn main() {
 
                 // Write to disk
                 write_log(&json.text);
+
+                // add new tags to tag list
+                let mut tags = Arc::clone(&tags_arc);
+                let new_tags = find_tags(&json.text);
+                for t in new_tags.into_iter() {
+                    Arc::get_mut(&mut tags).unwrap().insert(t);
+                }
 
 
                 Response::text(format!("field's value is {}", json.text))
@@ -73,4 +91,65 @@ fn append_to_file(body: &str, file_path: &str) -> Result<(), Box<dyn std::error:
     // Write the body content to the file
     file.write_all(body.as_bytes())?;
     Ok(())
+}
+
+fn load_tags() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+    let mut tags = HashSet::new();
+
+    let paths = fs::read_dir(LOGS_PATH)?;
+
+    for path_result in paths {
+        let path = path_result?.path();
+
+        if path.is_file() {
+            let file = OpenOptions::new().read(true).open(&path)?;
+            let mut contents = String::new();
+            let mut buffered_reader = std::io::BufReader::new(file);
+            buffered_reader.read_to_string(&mut contents)?;
+
+            find_tags(&contents).iter().for_each(|t| {
+                tags.insert(t.clone());
+            });
+        }
+    }
+
+    Ok(tags)
+}
+
+// find tags {<tag>} in file
+fn find_tags(file_contents: &String) -> HashSet<String> {
+    let mut tags: HashSet<String> = HashSet::new();
+
+    for line in file_contents.lines() {
+        // find tags
+        let mut buf = String::new();
+
+        for c in line.chars() {
+            match c {
+                '{' => {
+                    if buf.len() == 0 {
+                        buf.push('{')
+                    } else {
+                        // two '{' detected before closing '}' found
+                        break; // quit, this line is a lost cause
+                    }
+                }
+                '}' => {
+                    if buf.len() > 0 {
+                        // buf contains {...
+                        buf.push('}');
+                        tags.insert(buf.clone());
+                        buf.clear();
+                    }
+                }
+                _ => {
+                    if buf.len() > 0 {
+                        buf.push(c);
+                    }
+                }
+            }
+        }
+    }
+
+    tags
 }

@@ -49,12 +49,17 @@
     button:hover {
       background-color: #45a049;
     }
+
+    p {
+      overflow-wrap: break-word;
+    }
   </style>
 </head>
 
 <body>
 
   <div class="container">
+    <p id="taglist">Tags: </p>
     <textarea id="textbox" placeholder="Enter text here..."></textarea>
     <br>
     <button id="submitBtn">Submit</button>
@@ -100,6 +105,13 @@
           click_waiting = false;
         });
     });
+
+    <!-- Get tags list -->
+    fetch("/tags", {method: "GET"})
+      .then(response => response.text())
+      .then(data => {
+        document.getElementById("taglist").innerText = "Tags: " + data;
+      });
   </script>
 
 </body>
