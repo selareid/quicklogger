@@ -5,7 +5,7 @@ use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -17,7 +17,8 @@ fn main() {
 
     let index_html = if cfg!(debug_assertions) { INDEX_HTML.replace("example.com", &ext_addr) }
                         else { INDEX_HTML.replace("example.com", &ext_addr).replace("<script>eruda.init();</script>", "") };
-    let tags_arc: Arc<HashSet<String>> = Arc::new(load_tags().expect("Error while loading tags."));
+    let tags_arc: Arc<Mutex<HashSet<String>>> =
+        Arc::new(Mutex::new(load_tags().expect("Error while loading tags.")));
 
     rouille::start_server(web_addr, move |req| {
         println!("Got a request\n {:?}", req);
@@ -29,7 +30,7 @@ fn main() {
             },
             (GET) (/tags) => {
                 // respond with list of tags
-                let t_v: Vec<String> = tags_arc.iter().map(|s| s.clone()).collect();
+                let t_v: Vec<String> = tags_arc.lock().unwrap().iter().map(|s| s.clone()).collect();
                 Response::text(t_v.join(", "))
             },
             (POST) (/) => {
@@ -46,10 +47,10 @@ fn main() {
                 write_log(&json.text);
 
                 // add new tags to tag list
-                let mut tags = Arc::clone(&tags_arc);
                 let new_tags = find_tags(&json.text);
+                println!("New tags: {:?}", new_tags);
                 for t in new_tags.into_iter() {
-                    Arc::get_mut(&mut tags).unwrap().insert(t);
+                    tags_arc.lock().unwrap().insert(t);
                 }
 
 
