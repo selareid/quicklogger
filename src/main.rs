@@ -13,10 +13,13 @@ const LOGS_PATH: &str = "./logs";
 
 fn main() {
     let web_addr = "0.0.0.0:7489";
-    let ext_addr = "logger.selareid.xyz";
 
-    let index_html = if cfg!(debug_assertions) { INDEX_HTML.replace("example.com", &ext_addr) }
-                        else { INDEX_HTML.replace("example.com", &ext_addr).replace("<script>eruda.init();</script>", "") };
+    let index_html: String = if cfg!(debug_assertions) {
+        String::from(INDEX_HTML)
+    } else {
+        INDEX_HTML.replace("<script>eruda.init();</script>", "")
+    };
+
     let tags_arc: Arc<Mutex<HashSet<String>>> =
         Arc::new(Mutex::new(load_tags().expect("Error while loading tags.")));
 
