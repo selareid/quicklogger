@@ -30,7 +30,6 @@ fn main() {
 
         rouille::router!(req,
             (GET) (/) => {
-                // rouille::Response::text("Go away").with_status_code(200)
                 Response::html(&index_html)
             },
             (GET) (/tags) => {
@@ -39,7 +38,6 @@ fn main() {
                 Response::text(t_v.join(", "))
             },
             (POST) (/) => {
-                // Response::empty_204()
                 #[derive(Deserialize)]
                 #[derive(Debug)]
                 struct Json {
