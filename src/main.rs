@@ -23,6 +23,8 @@ fn main() {
     let tags_arc: Arc<Mutex<HashSet<String>>> =
         Arc::new(Mutex::new(load_tags().expect("Error while loading tags.")));
 
+    println!("Starting server at {}", web_addr);
+
     rouille::start_server(web_addr, move |req| {
         println!("Got a request\n {:?}", req);
 
