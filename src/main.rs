@@ -187,7 +187,7 @@ fn find_tags(file_contents: &String) -> HashSet<String> {
                     if buf.len() > 0 {
                         // buf contains {...
                         buf.push('}');
-                        tags.insert(buf.clone());
+                        tags.insert(buf.to_lowercase());
                         buf.clear();
                     }
                 }
