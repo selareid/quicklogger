@@ -97,13 +97,13 @@ fn append_to_file(body: &str, file_path: &str) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-fn load_tags() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
-    let mut tags = HashSet::new();
-
+fn get_log_files() -> Result<HashSet<(String, String)>, Box<dyn std::error::Error>> {
+    let mut logfile_contents = HashSet::new();
     let paths = fs::read_dir(LOGS_PATH)?;
 
     for path_result in paths {
-        let path = path_result?.path();
+        let dir_entr = path_result?;
+        let path = dir_entr.path();
 
         if path.is_file() {
             let file = OpenOptions::new().read(true).open(&path)?;
@@ -111,10 +111,24 @@ fn load_tags() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
             let mut buffered_reader = std::io::BufReader::new(file);
             buffered_reader.read_to_string(&mut contents)?;
 
-            find_tags(&contents).iter().for_each(|t| {
-                tags.insert(t.clone());
-            });
+            if contents.len() > 0 {
+                let filename = dir_entr.file_name().into_string().unwrap_or_default();
+
+                logfile_contents.insert((filename, contents));
+            }
         }
+    }
+
+    Ok(logfile_contents)
+}
+
+fn load_tags() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+    let mut tags = HashSet::new();
+
+    for (_, log_contents) in get_log_files()? {
+        find_tags(&log_contents).iter().for_each(|t| {
+            tags.insert(t.clone());
+        });
     }
 
     Ok(tags)
