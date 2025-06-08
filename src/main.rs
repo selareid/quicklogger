@@ -33,15 +33,9 @@ fn main() {
                 Response::html(&index_html)
             },
             (GET) (/history) => {
-                let hists_hash = get_log_files().unwrap_or_else(|_| HashSet::from([("_".to_string(), "Failed to read history.".to_string())]));
-                let mut all_hists = Vec::from_iter(hists_hash.iter());
-                all_hists.sort_by_key(|&p| std::cmp::Reverse(p));
-                Response::text(&all_hists.iter().map(|(p, s)| {
-                    let mut lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
-                    lines.reverse();
-                    let month_hist: String = lines.join("\n");
-                    format!("{p}:\n{month_hist}")
-                }).collect::<Vec<String>>().join("\n"))
+                Response::text(get_history_string(
+                    get_log_files().unwrap_or_else(|_| HashSet::from([("_".to_string(), "Failed to read history.".to_string())]))
+                ))
             },
             (GET) (/tags) => {
                 // respond with list of tags
@@ -131,6 +125,22 @@ fn get_log_files() -> Result<HashSet<(String, String)>, Box<dyn std::error::Erro
     }
 
     Ok(logfile_contents)
+}
+
+fn get_history_string(all_hists: HashSet<(String, String)>) -> String {
+    let mut all_hists = Vec::from_iter(all_hists.iter());
+    all_hists.sort_by_key(|&p| std::cmp::Reverse(p)); // sort all_hists by date (filename)
+
+    all_hists
+        .iter()
+        .map(|(p, s)| {
+            let mut lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
+            lines.reverse();
+            let month_hist: String = lines.join("\n");
+            format!("{p}:\n{month_hist}")
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 fn load_tags() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
