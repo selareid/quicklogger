@@ -37,6 +37,16 @@ fn main() {
                     get_log_files().unwrap_or_else(|_| HashSet::from([("_".to_string(), "Failed to read history.".to_string())]))
                 ))
             },
+            (GET) (/history/{year: usize}/{month: usize}) => {
+                let logs: HashSet<(String, String)> = get_log_files()
+                    .unwrap_or_else(|_| HashSet::new())
+                    .iter()
+                    .filter_map(|(p, s)| if *p == format!("{year}_{month}") {
+                        Some((String::from(p), String::from(s)))
+                        } else {None})
+                    .collect();
+                Response::text(get_history_string(logs))
+            },
             (GET) (/tags) => {
                 // respond with list of tags
                 let t_v: Vec<String> = tags_arc.lock().unwrap().iter().map(|s| s.clone()).collect();
