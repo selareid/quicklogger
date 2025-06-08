@@ -32,6 +32,12 @@ fn main() {
             (GET) (/) => {
                 Response::html(&index_html)
             },
+            (GET) (/history) => {
+                let hists_hash = get_log_files().unwrap_or_else(|_| HashSet::from([("_".to_string(), "Failed to read history.".to_string())]));
+                let mut all_hists = Vec::from_iter(hists_hash.iter());
+                all_hists.sort_by_key(|&p| std::cmp::Reverse(p));
+                Response::text(&all_hists.iter().map(|(p, s)| format!("{p}:\n{s}")).collect::<Vec<String>>().join("\n"))
+            },
             (GET) (/tags) => {
                 // respond with list of tags
                 let t_v: Vec<String> = tags_arc.lock().unwrap().iter().map(|s| s.clone()).collect();
