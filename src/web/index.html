@@ -35,6 +35,11 @@
       box-sizing: border-box;
     }
 
+    #imageInput {
+      margin-top: 12px;
+      width: 100%;
+    }
+
     button {
       margin-top: 20px;
       padding: 10px 20px;
@@ -53,6 +58,18 @@
     p {
       overflow-wrap: break-word;
     }
+
+    #uploadStatus {
+      margin-top: 12px;
+      min-height: 1.25rem;
+      font-size: 14px;
+    }
+
+    progress {
+      margin-top: 10px;
+      width: 100%;
+      display: none;
+    }
   </style>
 </head>
 
@@ -61,6 +78,9 @@
   <div class="container">
     <p id="taglist">Tags: </p>
     <textarea id="textbox" placeholder="Enter text here..."></textarea>
+    <input id="imageInput" type="file" accept="image/*">
+    <progress id="uploadProgress" value="0" max="100"></progress>
+    <p id="uploadStatus" aria-live="polite"></p>
     <br>
     <button id="submitBtn">Submit</button>
   </div>
@@ -70,6 +90,13 @@
     darkmode.enable();
 
     let click_waiting = false;
+    const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+
+    function updateUploadStatus(message, isError = false) {
+      const uploadStatus = document.getElementById('uploadStatus');
+      uploadStatus.textContent = message;
+      uploadStatus.style.color = isError ? '#d93025' : '';
+    }
 
     document.getElementById('submitBtn').addEventListener('click', function () {
       if (click_waiting) {
@@ -77,33 +104,75 @@
       }
 
       const textbox = document.getElementById('textbox');
+      const imageInput = document.getElementById('imageInput');
+      const uploadProgress = document.getElementById('uploadProgress');
+      const submitBtn = document.getElementById('submitBtn');
+      const imageFile = imageInput.files[0];
+
+      if (!imageFile) {
+        updateUploadStatus('Please choose an image before submitting.', true);
+        imageInput.focus();
+        return;
+      }
+
+      if (imageFile.size > MAX_IMAGE_SIZE_BYTES) {
+        const maxSizeMb = Math.floor(MAX_IMAGE_SIZE_BYTES / (1024 * 1024));
+        updateUploadStatus(`Image is too large. Maximum allowed size is ${maxSizeMb}MB.`, true);
+        imageInput.focus();
+        return;
+      }
+
       textbox.focus();
       textbox.scrollIntoView();
       click_waiting = true;
+      submitBtn.disabled = true;
+      uploadProgress.style.display = 'block';
+      uploadProgress.value = 0;
+      updateUploadStatus('Uploading...');
 
-      // Make an HTTPS POST request
-      fetch('/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({text: textbox.value})
-      })
-        .then(response => response.text())
-        .then(data => {
-          console.log('Success:', data);
-          alert('Content sent successfully!');
+      const formData = new FormData();
+      formData.append('text', textbox.value);
+      formData.append('image', imageFile);
 
-          textbox.value = "";
+      const request = new XMLHttpRequest();
+      request.open('POST', '/');
+
+      request.upload.addEventListener('progress', (event) => {
+        if (!event.lengthComputable) {
+          return;
+        }
+
+        const progressPercent = Math.round((event.loaded / event.total) * 100);
+        uploadProgress.value = progressPercent;
+        updateUploadStatus(`Uploading... ${progressPercent}%`);
+      });
+
+      request.addEventListener('load', () => {
+        if (request.status >= 200 && request.status < 300) {
+          console.log('Success:', request.responseText);
+          updateUploadStatus('Content and image uploaded successfully.');
+          uploadProgress.value = 100;
+
+          textbox.value = '';
+          imageInput.value = '';
           textbox.focus();
           textbox.scrollIntoView();
-          click_waiting = false;
-        })
-        .catch((error) => {
-          console.error('Error:', error);
-          alert('An error occurred!');
-          click_waiting = false;
-        });
+        } else {
+          updateUploadStatus(`Upload failed (${request.status}). Please try again.`, true);
+        }
+
+        click_waiting = false;
+        submitBtn.disabled = false;
+      });
+
+      request.addEventListener('error', () => {
+        console.error('Error:', request.statusText);
+        updateUploadStatus('An error occurred while uploading. Please check your connection and try again.', true);
+        click_waiting = false;
+        submitBtn.disabled = false;
+      });
+
+      request.send(formData);
     });
 
     <!-- Get tags list -->
