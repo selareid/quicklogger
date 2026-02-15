@@ -77,6 +77,15 @@
       display: none;
     }
 
+    #waveformPreview {
+      margin-top: 10px;
+      width: 100%;
+      height: 80px;
+      display: none;
+      border-radius: 6px;
+      background-color: rgba(0, 0, 0, 0.06);
+    }
+
     button {
       margin-top: 20px;
       padding: 10px 20px;
@@ -119,6 +128,7 @@
       <input id="imageInput" type="file" accept="image/*">
       <button id="recordBtn" type="button" aria-label="Start recording" title="Start recording">🎤</button>
     </div>
+    <canvas id="waveformPreview" width="600" height="80" aria-hidden="true"></canvas>
     <audio id="recordingPreview" controls></audio>
     <progress id="uploadProgress" value="0" max="100"></progress>
     <p id="uploadStatus" aria-live="polite"></p>
@@ -138,10 +148,92 @@
     let recordedAudioBlob = null;
     let recordingPreviewUrl = null;
     let isRecording = false;
+    let audioContext = null;
+    let analyser = null;
+    let waveformAnimationFrame = null;
+    let microphoneSource = null;
 
     const imageInput = document.getElementById('imageInput');
     const recordBtn = document.getElementById('recordBtn');
     const recordingPreview = document.getElementById('recordingPreview');
+    const waveformPreview = document.getElementById('waveformPreview');
+    const waveformContext = waveformPreview.getContext('2d');
+
+    function stopWaveformPreview() {
+      if (waveformAnimationFrame) {
+        cancelAnimationFrame(waveformAnimationFrame);
+        waveformAnimationFrame = null;
+      }
+
+      waveformPreview.style.display = 'none';
+      waveformContext.clearRect(0, 0, waveformPreview.width, waveformPreview.height);
+
+      if (microphoneSource) {
+        microphoneSource.disconnect();
+        microphoneSource = null;
+      }
+
+      if (analyser) {
+        analyser.disconnect();
+        analyser = null;
+      }
+
+      if (audioContext) {
+        audioContext.close().catch(() => { });
+        audioContext = null;
+      }
+    }
+
+    function startWaveformPreview(stream) {
+      stopWaveformPreview();
+
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) {
+        return;
+      }
+
+      audioContext = new AudioContextClass();
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+
+      microphoneSource = audioContext.createMediaStreamSource(stream);
+      microphoneSource.connect(analyser);
+
+      const dataArray = new Uint8Array(analyser.fftSize);
+      waveformPreview.style.display = 'block';
+
+      const draw = () => {
+        analyser.getByteTimeDomainData(dataArray);
+
+        waveformContext.clearRect(0, 0, waveformPreview.width, waveformPreview.height);
+        waveformContext.lineWidth = 2;
+        waveformContext.strokeStyle = '#1a73e8';
+        waveformContext.beginPath();
+
+        const sliceWidth = waveformPreview.width / dataArray.length;
+        let x = 0;
+
+        for (let i = 0; i < dataArray.length; i++) {
+          const normalized = dataArray[i] / 128.0;
+          const y = (normalized * waveformPreview.height) / 2;
+
+          if (i === 0) {
+            waveformContext.moveTo(x, y);
+          } else {
+            waveformContext.lineTo(x, y);
+          }
+
+          x += sliceWidth;
+        }
+
+        waveformContext.lineTo(waveformPreview.width, waveformPreview.height / 2);
+        waveformContext.stroke();
+
+        waveformAnimationFrame = requestAnimationFrame(draw);
+      };
+
+      draw();
+    }
 
     function updateUploadStatus(message, isError = false) {
       const uploadStatus = document.getElementById('uploadStatus');
@@ -226,15 +318,25 @@
             mediaStream = null;
           }
 
+          stopWaveformPreview();
+
           setRecordingButtonState(false);
         });
 
         mediaRecorder.start();
+        startWaveformPreview(mediaStream);
         setRecordingButtonState(true);
         updateUploadStatus('Recording in progress... Tap again to stop.');
       } catch (error) {
         console.error(error);
         updateUploadStatus('Unable to access your microphone.', true);
+        stopWaveformPreview();
+
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream = null;
+        }
+
         setRecordingButtonState(false);
       }
     });
@@ -247,6 +349,8 @@
         if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
           mediaRecorder.stop();
         }
+
+        stopWaveformPreview();
 
         updateUploadStatus('Image selected. Ready to upload.');
       }
