@@ -11,7 +11,9 @@ use std::{
 };
 
 const INDEX_HTML: &str = include_str!("web/index.html");
-const LOGS_PATH: &str = "./logs";
+pub(crate) const LOGS_PATH: &str = "./logs";
+pub(crate) const IMAGES_PATH: &str = "./images";
+pub(crate) const AUDIO_PATH: &str = "./audio";
 
 fn main() {
     let web_addr = "0.0.0.0:7489";
@@ -64,11 +66,11 @@ fn main() {
     });
 }
 
-pub(crate) fn write_log(body: &str) {
+pub(crate) fn write_log(body: &str) -> Result<(), Box<dyn std::error::Error>> {
     let current_date = Utc::now();
     let month_year: String = format!("{}_{}", current_date.year(), current_date.month());
 
-    match append_to_file(
+    append_to_file(
         &format!(
             "{} {} {} {} {}: {}\n",
             current_date.timestamp(),
@@ -79,13 +81,34 @@ pub(crate) fn write_log(body: &str) {
             body
         ),
         &format!("{}/{}", LOGS_PATH, month_year),
-    ) {
-        Ok(_) => (),
-        Err(e) => eprintln!("Error when writing to file!\n{:?}", e),
-    }
+    )
+}
+
+pub(crate) fn write_media_log_entry(
+    media_path: &str,
+    mime_type: &str,
+    caption: Option<&str>,
+    tags: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let timestamp = Utc::now().to_rfc3339();
+    let caption = caption.unwrap_or("").replace('"', "\\\"");
+    let tags_string = if tags.is_empty() {
+        String::new()
+    } else {
+        tags.join(",")
+    };
+
+    write_log(&format!(
+        "media path=\"{}\" timestamp=\"{}\" mime=\"{}\" caption=\"{}\" tags=\"{}\"",
+        media_path, timestamp, mime_type, caption, tags_string
+    ))
 }
 
 fn append_to_file(body: &str, file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent_dir) = std::path::Path::new(file_path).parent() {
+        fs::create_dir_all(parent_dir)?;
+    }
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)

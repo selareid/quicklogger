@@ -7,3 +7,4 @@ edition = "2021"
 chrono = "0.4.39"
 rouille = "3.6.2"
 serde = { version = "1.0.217", features = ["derive"] }
+rand = "0.8.5"
