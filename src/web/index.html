@@ -52,6 +52,11 @@
       margin-top: 0;
       background-color: #1a73e8;
       white-space: nowrap;
+      min-width: 48px;
+      padding-left: 12px;
+      padding-right: 12px;
+      font-size: 20px;
+      line-height: 1;
     }
 
     #recordBtn:hover {
@@ -112,7 +117,7 @@
     <textarea id="textbox" placeholder="Enter text here..."></textarea>
     <div id="mediaPickerRow">
       <input id="imageInput" type="file" accept="image/*">
-      <button id="recordBtn" type="button">Start Recording</button>
+      <button id="recordBtn" type="button" aria-label="Start recording" title="Start recording">🎤</button>
     </div>
     <audio id="recordingPreview" controls></audio>
     <progress id="uploadProgress" value="0" max="100"></progress>
@@ -157,10 +162,14 @@
     function setRecordingButtonState(recording) {
       isRecording = recording;
       if (recording) {
-        recordBtn.textContent = 'Stop Recording';
+        recordBtn.textContent = '⏹';
+        recordBtn.setAttribute('aria-label', 'Stop recording');
+        recordBtn.title = 'Stop recording';
         recordBtn.classList.add('recording');
       } else {
-        recordBtn.textContent = 'Start Recording';
+        recordBtn.textContent = '🎤';
+        recordBtn.setAttribute('aria-label', 'Start recording');
+        recordBtn.title = 'Start recording';
         recordBtn.classList.remove('recording');
       }
     }
