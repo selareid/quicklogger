@@ -11,6 +11,7 @@ use std::{
 };
 
 const INDEX_HTML: &str = include_str!("web/index.html");
+const AUDIO_RECORDER_JS: &str = include_str!("web/audio-recorder.js");
 pub(crate) const LOGS_PATH: &str = "./logs";
 pub(crate) const IMAGES_PATH: &str = "./images";
 pub(crate) const AUDIO_PATH: &str = "./audio";
@@ -35,6 +36,9 @@ fn main() {
         rouille::router!(req,
             (GET) (/) => {
                 Response::html(&index_html)
+            },
+            (GET) (/audio-recorder_js) => {
+                Response::from_data("application/javascript", AUDIO_RECORDER_JS)
             },
             (GET) (/history) => {
                 Response::text(get_history_string(
