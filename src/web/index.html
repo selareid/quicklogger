@@ -35,9 +35,46 @@
       box-sizing: border-box;
     }
 
-    #imageInput {
+    #mediaPickerRow {
       margin-top: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    #imageInput {
+      margin-top: 0;
       width: 100%;
+      flex: 1;
+    }
+
+    #recordBtn {
+      margin-top: 0;
+      background-color: #1a73e8;
+      white-space: nowrap;
+      min-width: 48px;
+      padding-left: 12px;
+      padding-right: 12px;
+      font-size: 20px;
+      line-height: 1;
+    }
+
+    #recordBtn:hover {
+      background-color: #1558b0;
+    }
+
+    #recordBtn.recording {
+      background-color: #c5221f;
+    }
+
+    #recordBtn.recording:hover {
+      background-color: #a50e0e;
+    }
+
+    #recordingPreview {
+      margin-top: 10px;
+      width: 100%;
+      display: none;
     }
 
     button {
@@ -78,7 +115,11 @@
   <div class="container">
     <p id="taglist">Tags: </p>
     <textarea id="textbox" placeholder="Enter text here..."></textarea>
-    <input id="imageInput" type="file" accept="image/*">
+    <div id="mediaPickerRow">
+      <input id="imageInput" type="file" accept="image/*">
+      <button id="recordBtn" type="button" aria-label="Start recording" title="Start recording">🎤</button>
+    </div>
+    <audio id="recordingPreview" controls></audio>
     <progress id="uploadProgress" value="0" max="100"></progress>
     <p id="uploadStatus" aria-live="polite"></p>
     <br>
@@ -91,6 +132,16 @@
 
     let click_waiting = false;
     const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+    let mediaRecorder = null;
+    let mediaStream = null;
+    let recordedChunks = [];
+    let recordedAudioBlob = null;
+    let recordingPreviewUrl = null;
+    let isRecording = false;
+
+    const imageInput = document.getElementById('imageInput');
+    const recordBtn = document.getElementById('recordBtn');
+    const recordingPreview = document.getElementById('recordingPreview');
 
     function updateUploadStatus(message, isError = false) {
       const uploadStatus = document.getElementById('uploadStatus');
@@ -98,24 +149,127 @@
       uploadStatus.style.color = isError ? '#d93025' : '';
     }
 
+    function clearRecordingPreview() {
+      if (recordingPreviewUrl) {
+        URL.revokeObjectURL(recordingPreviewUrl);
+        recordingPreviewUrl = null;
+      }
+
+      recordingPreview.style.display = 'none';
+      recordingPreview.removeAttribute('src');
+    }
+
+    function setRecordingButtonState(recording) {
+      isRecording = recording;
+      if (recording) {
+        recordBtn.textContent = '⏹';
+        recordBtn.setAttribute('aria-label', 'Stop recording');
+        recordBtn.title = 'Stop recording';
+        recordBtn.classList.add('recording');
+      } else {
+        recordBtn.textContent = '🎤';
+        recordBtn.setAttribute('aria-label', 'Start recording');
+        recordBtn.title = 'Start recording';
+        recordBtn.classList.remove('recording');
+      }
+    }
+
+    function getRecorderOptions() {
+      const preferredMimeType = 'audio/webm';
+      const hasMimeTypeSupportCheck = typeof MediaRecorder.isTypeSupported === 'function';
+
+      if (hasMimeTypeSupportCheck && MediaRecorder.isTypeSupported(preferredMimeType)) {
+        return { mimeType: preferredMimeType };
+      }
+
+      return undefined;
+    }
+
+    recordBtn.addEventListener('click', async function () {
+      if (isRecording) {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
+        return;
+      }
+
+      if (!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        updateUploadStatus('Audio recording is not supported in this browser.', true);
+        return;
+      }
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recordedChunks = [];
+        recordedAudioBlob = null;
+        clearRecordingPreview();
+        imageInput.value = '';
+
+        mediaRecorder = new MediaRecorder(mediaStream, getRecorderOptions());
+        mediaRecorder.addEventListener('dataavailable', (event) => {
+          if (event.data && event.data.size > 0) {
+            recordedChunks.push(event.data);
+          }
+        });
+
+        mediaRecorder.addEventListener('stop', () => {
+          const recordingMimeType = mediaRecorder.mimeType || 'audio/webm';
+          recordedAudioBlob = new Blob(recordedChunks, { type: recordingMimeType });
+          clearRecordingPreview();
+          recordingPreviewUrl = URL.createObjectURL(recordedAudioBlob);
+          recordingPreview.src = recordingPreviewUrl;
+          recordingPreview.style.display = 'block';
+          updateUploadStatus('Audio recording is ready to upload.');
+
+          if (mediaStream) {
+            mediaStream.getTracks().forEach((track) => track.stop());
+            mediaStream = null;
+          }
+
+          setRecordingButtonState(false);
+        });
+
+        mediaRecorder.start();
+        setRecordingButtonState(true);
+        updateUploadStatus('Recording in progress... Tap again to stop.');
+      } catch (error) {
+        console.error(error);
+        updateUploadStatus('Unable to access your microphone.', true);
+        setRecordingButtonState(false);
+      }
+    });
+
+    imageInput.addEventListener('change', function () {
+      if (imageInput.files.length > 0) {
+        recordedAudioBlob = null;
+        clearRecordingPreview();
+
+        if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
+
+        updateUploadStatus('Image selected. Ready to upload.');
+      }
+    });
+
     document.getElementById('submitBtn').addEventListener('click', function () {
       if (click_waiting) {
         return;
       }
 
       const textbox = document.getElementById('textbox');
-      const imageInput = document.getElementById('imageInput');
       const uploadProgress = document.getElementById('uploadProgress');
       const submitBtn = document.getElementById('submitBtn');
       const imageFile = imageInput.files[0];
+      const hasRecordedAudio = !!recordedAudioBlob;
 
-      if (!imageFile) {
-        updateUploadStatus('Please choose an image before submitting.', true);
+      if (!imageFile && !hasRecordedAudio) {
+        updateUploadStatus('Please choose an image or record audio before submitting.', true);
         imageInput.focus();
         return;
       }
 
-      if (imageFile.size > MAX_IMAGE_SIZE_BYTES) {
+      if (imageFile && imageFile.size > MAX_IMAGE_SIZE_BYTES) {
         const maxSizeMb = Math.floor(MAX_IMAGE_SIZE_BYTES / (1024 * 1024));
         updateUploadStatus(`Image is too large. Maximum allowed size is ${maxSizeMb}MB.`, true);
         imageInput.focus();
@@ -131,8 +285,14 @@
       updateUploadStatus('Uploading...');
 
       const formData = new FormData();
-      formData.append('text', textbox.value);
-      formData.append('image', imageFile);
+      formData.append('caption', textbox.value);
+
+      if (hasRecordedAudio) {
+        const extension = recordedAudioBlob.type.includes('ogg') ? 'ogg' : 'webm';
+        formData.append('audio', recordedAudioBlob, `recording-${Date.now()}.${extension}`);
+      } else {
+        formData.append('image', imageFile);
+      }
 
       const request = new XMLHttpRequest();
       request.open('POST', '/');
@@ -150,11 +310,13 @@
       request.addEventListener('load', () => {
         if (request.status >= 200 && request.status < 300) {
           console.log('Success:', request.responseText);
-          updateUploadStatus('Content and image uploaded successfully.');
+          updateUploadStatus('Content uploaded successfully.');
           uploadProgress.value = 100;
 
           textbox.value = '';
           imageInput.value = '';
+          recordedAudioBlob = null;
+          clearRecordingPreview();
           textbox.focus();
           textbox.scrollIntoView();
         } else {
@@ -175,11 +337,19 @@
       request.send(formData);
     });
 
-    <!-- Get tags list -->
-    fetch("/tags", {method: "GET"})
-      .then(response => response.text())
+    fetch('/tags', { method: 'GET' })
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`Tag request failed (${response.status})`);
+        }
+        return response.text();
+      })
       .then(data => {
-        document.getElementById("taglist").innerText = "Tags: " + data;
+        document.getElementById('taglist').innerText = 'Tags: ' + data;
+      })
+      .catch((error) => {
+        console.error('Failed to load tags:', error);
+        document.getElementById('taglist').innerText = 'Tags: unavailable';
       });
   </script>
 
