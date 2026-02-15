@@ -263,9 +263,11 @@
       const imageFile = imageInput.files[0];
       const hasRecordedAudio = !!recordedAudioBlob;
 
-      if (!imageFile && !hasRecordedAudio) {
-        updateUploadStatus('Please choose an image or record audio before submitting.', true);
-        imageInput.focus();
+      const hasText = textbox.value.trim().length > 0;
+
+      if (!imageFile && !hasRecordedAudio && !hasText) {
+        updateUploadStatus('Please enter text, choose an image, or record audio before submitting.', true);
+        textbox.focus();
         return;
       }
 
@@ -290,7 +292,7 @@
       if (hasRecordedAudio) {
         const extension = recordedAudioBlob.type.includes('ogg') ? 'ogg' : 'webm';
         formData.append('audio', recordedAudioBlob, `recording-${Date.now()}.${extension}`);
-      } else {
+      } else if (imageFile) {
         formData.append('image', imageFile);
       }
 

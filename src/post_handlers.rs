@@ -150,8 +150,25 @@ fn handle_multipart_upload(req: &Request, tags_arc: &Arc<Mutex<HashSet<String>>>
         }
     }
 
+    let non_empty_caption = caption
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+
     let Some(upload_data) = upload_data else {
-        return api_response(400, false, "Missing required file field (file/image/audio)");
+        if let Some(caption_text) = non_empty_caption {
+            if let Err(_) = process_text_submission(caption_text, tags_arc) {
+                return api_response(500, false, "Failed to persist log message");
+            }
+
+            return api_response(201, true, "Text note accepted");
+        }
+
+        return api_response(
+            400,
+            false,
+            "Missing note text or file field (file/image/audio)",
+        );
     };
 
     let storage_result = persist_media_file(&upload_data);
@@ -159,11 +176,6 @@ fn handle_multipart_upload(req: &Request, tags_arc: &Arc<Mutex<HashSet<String>>>
         Ok(path) => path,
         Err(_) => return api_response(500, false, "Failed to store uploaded media"),
     };
-
-    let non_empty_caption = caption
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty());
 
     if let Err(_) = super::write_media_log_entry(
         &stored_relative_path,
