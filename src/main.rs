@@ -1,12 +1,15 @@
+mod history_view;
 mod post_handlers;
 
 use chrono::{Datelike, Utc};
+use history_view::get_history_html;
 use post_handlers::handle_post_request;
 use rouille::Response;
 use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
     io::{Read, Write},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -41,7 +44,7 @@ fn main() {
                 Response::from_data("application/javascript", AUDIO_RECORDER_JS)
             },
             (GET) (/history) => {
-                Response::text(get_history_string(
+                Response::html(get_history_html(
                     get_log_files().unwrap_or_else(|_| HashSet::from([("_".to_string(), "Failed to read history.".to_string())]))
                 ))
             },
@@ -53,7 +56,13 @@ fn main() {
                         Some((String::from(p), String::from(s)))
                         } else {None})
                     .collect();
-                Response::text(get_history_string(logs))
+                Response::html(get_history_html(logs))
+            },
+            (GET) (/images/{year: String}/{month: String}/{filename: String}) => {
+                serve_media_file(IMAGES_PATH, &year, &month, &filename, image_content_type(&filename))
+            },
+            (GET) (/audio/{year: String}/{month: String}/{filename: String}) => {
+                serve_media_file(AUDIO_PATH, &year, &month, &filename, audio_content_type(&filename))
             },
             (GET) (/tags) => {
                 let t_v: Vec<String> = tags_arc.lock().unwrap().iter().cloned().collect();
@@ -146,20 +155,78 @@ fn get_log_files() -> Result<HashSet<(String, String)>, Box<dyn std::error::Erro
     Ok(logfile_contents)
 }
 
-fn get_history_string(all_hists: HashSet<(String, String)>) -> String {
-    let mut all_hists = Vec::from_iter(all_hists.iter());
-    all_hists.sort_by_key(|&p| std::cmp::Reverse(p));
-
-    all_hists
+fn serve_media_file(
+    media_root: &str,
+    year: &str,
+    month: &str,
+    filename: &str,
+    content_type: &'static str,
+) -> Response {
+    if [year, month, filename]
         .iter()
-        .map(|(p, s)| {
-            let mut lines: Vec<String> = s.lines().map(|l| l.to_string()).collect();
-            lines.reverse();
-            let month_hist: String = lines.join("\n");
-            format!("{p}:\n{month_hist}")
-        })
-        .collect::<Vec<String>>()
-        .join("\n")
+        .any(|part| part.contains('/') || part.contains("..") || part.contains('\\'))
+    {
+        return Response::empty_404();
+    }
+
+    let full_path = PathBuf::from(media_root)
+        .join(year)
+        .join(month)
+        .join(filename);
+
+    if !full_path.exists() || !full_path.is_file() {
+        return Response::empty_404();
+    }
+
+    let canonical_root = match fs::canonicalize(media_root) {
+        Ok(path) => path,
+        Err(_) => return Response::empty_404(),
+    };
+    let canonical_file = match fs::canonicalize(&full_path) {
+        Ok(path) => path,
+        Err(_) => return Response::empty_404(),
+    };
+
+    if !canonical_file.starts_with(&canonical_root) {
+        return Response::empty_404();
+    }
+
+    match fs::read(&full_path) {
+        Ok(bytes) => Response::from_data(content_type, bytes),
+        Err(_) => Response::empty_404(),
+    }
+}
+
+fn image_content_type(filename: &str) -> &'static str {
+    match Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    }
+}
+
+fn audio_content_type(filename: &str) -> &'static str {
+    match Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "webm" => "audio/webm",
+        _ => "application/octet-stream",
+    }
 }
 
 fn load_tags() -> Result<HashSet<String>, Box<dyn std::error::Error>> {
