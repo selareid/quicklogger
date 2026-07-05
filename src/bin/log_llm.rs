@@ -23,6 +23,7 @@ const LLM_LOGS_PATH: &str = "./llm_logs";
 const MAX_ENTRY_CHARS: usize = 1_500;
 const MAX_RESULT_ENTRIES: usize = 100;
 const VERBOSE_VALUE_CHARS: usize = 2_000;
+const CONSOLE_ARGUMENT_CHARS: usize = 500;
 const MAX_RATE_LIMIT_RETRIES: usize = 8;
 const MAX_RATE_LIMIT_BACKOFF_SECS: u64 = 60;
 
@@ -173,18 +174,18 @@ fn next_arg(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nRun logs:\n  Full run logs are always written under ./llm_logs. Use --verbose to also echo progress to stderr.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
+        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nConsole output:\n  Lightweight progress is printed while the harness runs. Use --verbose for compact tool-result/error snippets too. Full API payloads stay in ./llm_logs.\n\nRun logs:\n  Full run logs are always written under ./llm_logs.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
     );
 }
 
 struct RunLogger {
     path: PathBuf,
     file: fs::File,
-    echo_to_stderr: bool,
+    verbose: bool,
 }
 
 impl RunLogger {
-    fn new(echo_to_stderr: bool) -> AppResult<Self> {
+    fn new(verbose: bool) -> AppResult<Self> {
         fs::create_dir_all(LLM_LOGS_PATH)?;
         let started_at = Utc::now();
         let filename = format!(
@@ -207,7 +208,7 @@ impl RunLogger {
         Ok(Self {
             path,
             file,
-            echo_to_stderr,
+            verbose,
         })
     }
 
@@ -217,16 +218,14 @@ impl RunLogger {
 
     fn log(&mut self, message: impl AsRef<str>) {
         let message = message.as_ref();
-        if self.echo_to_stderr {
-            eprintln!("[log-llm] {message}");
-        }
+        eprintln!("[log-llm] {message}");
         let _ = writeln!(self.file, "[{}] {message}", Utc::now().to_rfc3339());
         let _ = self.file.flush();
     }
 
     fn log_value(&mut self, label: &str, value: &Value) {
         let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-        if self.echo_to_stderr {
+        if self.verbose && matches!(label, "tool_result" | "openai_error") {
             eprintln!(
                 "[log-llm] {label}: {}",
                 truncate_chars(&text, VERBOSE_VALUE_CHARS)
@@ -391,7 +390,7 @@ impl OpenAiClient {
             if is_retryable_rate_limit(status, &text) && attempt < MAX_RATE_LIMIT_RETRIES {
                 let (delay, source) = retry_delay(retry_after_header, &text, attempt);
                 logger.log(format!(
-                    "rate_limit_exceeded: retrying OpenAI request in {:.3}s using {} (attempt {}/{})",
+                    "rate_limit_exceeded: waiting {:.3}s before retry ({}, attempt {}/{})",
                     delay.as_secs_f64(),
                     source,
                     attempt + 1,
@@ -456,7 +455,7 @@ impl Harness {
 
         for step in 0..max_steps {
             self.log(format!(
-                "step {}/{}: sending model request with {} conversation item(s)",
+                "step {}/{}: asking model what to do next ({} conversation item(s))",
                 step + 1,
                 max_steps,
                 input_items.len()
@@ -488,10 +487,9 @@ impl Harness {
             }
 
             self.log(format!(
-                "step {}/{}: model returned {} output item(s), {} tool call(s)",
+                "step {}/{}: model returned {} tool call(s)",
                 step + 1,
                 max_steps,
-                output.len(),
                 tool_calls.len()
             ));
 
@@ -528,7 +526,10 @@ impl Harness {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
 
-                self.log(format!("tool call: {name}({arguments})"));
+                self.log(format!(
+                    "tool: {name} {}",
+                    truncate_chars(arguments, CONSOLE_ARGUMENT_CHARS)
+                ));
 
                 if name == "finish" {
                     let answer = args
@@ -548,6 +549,7 @@ impl Harness {
                 }
 
                 let result = self.call_tool(name, &args);
+                self.log_tool_summary(name, &result);
                 self.logger.log_value("tool_result", &json!({
                     "tool": name,
                     "arguments": args,
@@ -562,6 +564,26 @@ impl Harness {
         }
 
         Err(format!("Reached --max-steps ({max_steps}) before the model called finish").into())
+    }
+
+    fn log_tool_summary(&mut self, name: &str, result: &Value) {
+        let mut parts = Vec::new();
+        for key in ["total_matches", "returned", "cursor_index", "entry_count", "offset", "limit"] {
+            if let Some(value) = result.get(key) {
+                parts.push(format!("{key}={value}"));
+            }
+        }
+        if let Some(entries) = result.get("entries").and_then(Value::as_array) {
+            parts.push(format!("entries={}", entries.len()));
+        }
+        if result.get("error").is_some() {
+            parts.push(format!("error={}", result["error"]));
+        }
+        if parts.is_empty() {
+            self.log(format!("tool result: {name} completed"));
+        } else {
+            self.log(format!("tool result: {name} {}", parts.join(", ")));
+        }
     }
 
     fn instructions(&self) -> String {
