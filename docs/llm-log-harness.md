@@ -16,7 +16,18 @@ OPENAI_API_KEY=sk-... cargo run --bin log_llm -- --model gpt-5.4-mini --goal "su
 
 Normal runs print lightweight progress to stderr while they run. You will see setup details, parsed log count, step `N/max`, tool names, compact tool-result counts, retry waits, and the final log path. Full API payloads are not printed to the terminal.
 
-Every run writes a full debug log under `./llm_logs`, even without `--verbose`. The log file includes run metadata, parsed log count, each OpenAI request payload, each OpenAI response payload, tool calls, tool arguments, and tool results.
+Interactive input:
+
+- You can type extra messages at any time while the harness is running.
+- Messages typed during API/model/tool work are queued and inserted before the next model request.
+- After each answer, the harness stays open and waits for follow-up input.
+- Type a follow-up and press Enter to continue the same conversation.
+- Type `/quit`, `/exit`, `:q`, `quit`, or `exit` to stop.
+- Blank lines are ignored.
+
+The model also has a `wait_for_user_input` action. It can call this when the goal is vague, ambiguous, or missing needed context. When that happens, the harness pauses, shows the model's question in the terminal, waits for your typed reply, and sends that reply back as the action result.
+
+Every run writes a full debug log under `./llm_logs`, even without `--verbose`. The log file includes run metadata, parsed log count, each OpenAI request payload, each OpenAI response payload, tool calls, tool arguments, tool results, follow-up messages, and wait-for-user-input replies.
 
 The log files can contain private QuickLogger entries and model responses. The `llm_logs/.gitignore` file keeps generated `.log` files out of git.
 
@@ -70,6 +81,7 @@ Available actions include:
 - `get_log_entries_around`
 - `read_notes`
 - `write_notes`
+- `wait_for_user_input`
 - `finish`
 
 Dates passed to actions are UTC dates because QuickLogger writes entries using `Utc::now()`.
