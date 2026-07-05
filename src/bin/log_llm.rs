@@ -10,8 +10,9 @@ use std::{
     env,
     error::Error,
     fs,
-    io::Write,
+    io::{self, BufRead, Write},
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::Duration,
 };
@@ -31,6 +32,7 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 fn main() -> AppResult<()> {
     let config = Config::from_args()?;
+    let mut user_input = UserInput::spawn();
     let mut run_logger = RunLogger::new(config.verbose)?;
     let run_log_path = run_logger.path().display().to_string();
 
@@ -39,6 +41,8 @@ fn main() -> AppResult<()> {
     run_logger.log(format!("model: {}", config.model));
     run_logger.log(format!("max steps: {}", config.max_steps));
     run_logger.log(format!("goal: {}", config.goal));
+    run_logger.log("type extra messages at any time; they will be added before the next model request");
+    run_logger.log("after an answer, type a follow-up and press Enter, or type /quit to exit");
 
     let api_key = match env::var("OPENAI_API_KEY") {
         Ok(api_key) => {
@@ -88,7 +92,9 @@ fn main() -> AppResult<()> {
 
     let client = OpenAiClient::new(api_key)?;
     let mut harness = Harness::new(entries, run_logger);
-    let answer = match harness.run(&client, &config.goal, &config.model, config.max_steps) {
+    harness.push_initial_goal(&config.goal);
+
+    let answer = match harness.run(&client, &mut user_input, &config.model, config.max_steps) {
         Ok(answer) => answer,
         Err(error) => {
             harness.log(format!("run failed: {error}"));
@@ -96,15 +102,41 @@ fn main() -> AppResult<()> {
             return Err(error);
         }
     };
-
     harness.log("run finished successfully");
-    let run_log_path = harness.log_path().display().to_string();
+    print_run_result(&answer, &harness);
 
-    println!("\n=== Answer ===\n{answer}");
-    println!("\n=== Notes ===\n{}", harness.notes.trim());
-    println!("\n=== LLM Run Log ===\n{run_log_path}");
+    loop {
+        harness.log("waiting for follow-up input; type a message and press Enter, or /quit to exit");
+        let messages = user_input.wait_for_messages();
+        if messages.is_empty() {
+            harness.log("stdin closed; exiting follow-up loop");
+            break;
+        }
+        if messages.iter().any(|message| is_exit_input(message)) {
+            harness.log("user requested exit");
+            break;
+        }
+
+        harness.add_user_messages("Follow-up user input", messages);
+        let answer = match harness.run(&client, &mut user_input, &config.model, config.max_steps) {
+            Ok(answer) => answer,
+            Err(error) => {
+                harness.log(format!("run failed: {error}"));
+                eprintln!("LLM run log: {}", harness.log_path().display());
+                return Err(error);
+            }
+        };
+        harness.log("follow-up run finished successfully");
+        print_run_result(&answer, &harness);
+    }
 
     Ok(())
+}
+
+fn print_run_result(answer: &str, harness: &Harness) {
+    println!("\n=== Answer ===\n{answer}");
+    println!("\n=== Notes ===\n{}", harness.notes.trim());
+    println!("\n=== LLM Run Log ===\n{}", harness.log_path().display());
 }
 
 struct Config {
@@ -174,8 +206,79 @@ fn next_arg(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nConsole output:\n  Lightweight progress is printed while the harness runs. Use --verbose for compact tool-result/error snippets too. Full API payloads stay in ./llm_logs.\n\nRun logs:\n  Full run logs are always written under ./llm_logs.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
+        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nInteractive input:\n  Type extra messages at any time while the harness is running. They are queued and added before the next model request. After each answer, the harness waits for a follow-up; type /quit to exit.\n\nConsole output:\n  Lightweight progress is printed while the harness runs. Use --verbose for compact tool-result/error snippets too. Full API payloads stay in ./llm_logs.\n\nRun logs:\n  Full run logs are always written under ./llm_logs.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
     );
+}
+
+struct UserInput {
+    receiver: Receiver<String>,
+    closed: bool,
+}
+
+impl UserInput {
+    fn spawn() -> Self {
+        let (sender, receiver) = mpsc::channel::<String>();
+        thread::spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(line) => {
+                        if sender.send(line).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            receiver,
+            closed: false,
+        }
+    }
+
+    fn drain_pending(&mut self) -> Vec<String> {
+        let mut messages = Vec::new();
+        loop {
+            match self.receiver.try_recv() {
+                Ok(line) => {
+                    if let Some(message) = normalize_user_message(&line) {
+                        messages.push(message);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.closed = true;
+                    break;
+                }
+            }
+        }
+        messages
+    }
+
+    fn wait_for_messages(&mut self) -> Vec<String> {
+        let mut messages = self.drain_pending();
+        if !messages.is_empty() || self.closed {
+            return messages;
+        }
+
+        loop {
+            match self.receiver.recv() {
+                Ok(line) => {
+                    if let Some(message) = normalize_user_message(&line) {
+                        messages.push(message);
+                        messages.extend(self.drain_pending());
+                        return messages;
+                    }
+                }
+                Err(_) => {
+                    self.closed = true;
+                    return messages;
+                }
+            }
+        }
+    }
 }
 
 struct RunLogger {
@@ -419,6 +522,7 @@ struct Harness {
     cursor_index: Option<usize>,
     notes: String,
     logger: RunLogger,
+    input_items: Vec<Value>,
 }
 
 impl Harness {
@@ -428,6 +532,7 @@ impl Harness {
             cursor_index: None,
             notes: String::new(),
             logger,
+            input_items: Vec::new(),
         }
     }
 
@@ -439,31 +544,51 @@ impl Harness {
         self.logger.log(message);
     }
 
+    fn push_initial_goal(&mut self, goal: &str) {
+        self.input_items.push(user_message_item(format!(
+            "Goal: {goal}\n\nUse the available log-reading actions to inspect the QuickLogger log data. Keep useful intermediate findings in the notes object. Do not claim a fact from the logs unless you saw it in an action result. When done, call finish with the final answer. Dates in tool arguments are UTC dates because QuickLogger writes log timestamps with Utc::now()."
+        )));
+    }
+
+    fn add_user_messages(&mut self, label: &str, messages: Vec<String>) {
+        for message in messages {
+            self.log(format!(
+                "queued user message for next model call: {}",
+                truncate_chars(&message, CONSOLE_ARGUMENT_CHARS)
+            ));
+            self.input_items
+                .push(user_message_item(format!("{label}:\n{message}")));
+        }
+    }
+
+    fn drain_queued_user_messages(&mut self, user_input: &mut UserInput) -> AppResult<()> {
+        let messages = user_input.drain_pending();
+        if messages.iter().any(|message| is_exit_input(message)) {
+            return Err("user requested exit".into());
+        }
+        self.add_user_messages("Additional user input while the harness was running", messages);
+        Ok(())
+    }
+
     fn run(
         &mut self,
         client: &OpenAiClient,
-        goal: &str,
+        user_input: &mut UserInput,
         model: &str,
         max_steps: usize,
     ) -> AppResult<String> {
-        let mut input_items = vec![json!({
-            "role": "user",
-            "content": format!(
-                "Goal: {goal}\n\nUse the available log-reading actions to inspect the QuickLogger log data. Keep useful intermediate findings in the notes object. Do not claim a fact from the logs unless you saw it in an action result. When done, call finish with the final answer. Dates in tool arguments are UTC dates because QuickLogger writes log timestamps with Utc::now()."
-            )
-        })];
-
         for step in 0..max_steps {
+            self.drain_queued_user_messages(user_input)?;
             self.log(format!(
                 "step {}/{}: asking model what to do next ({} conversation item(s))",
                 step + 1,
                 max_steps,
-                input_items.len()
+                self.input_items.len()
             ));
 
             let request_body = json!({
                 "model": model,
-                "input": input_items,
+                "input": self.input_items.clone(),
                 "instructions": self.instructions(),
                 "tools": self.tools(),
                 "parallel_tool_calls": false,
@@ -494,7 +619,7 @@ impl Harness {
             ));
 
             for item in output {
-                input_items.push(item);
+                self.input_items.push(item);
             }
 
             if tool_calls.is_empty() {
@@ -545,36 +670,77 @@ impl Harness {
                     if answer.is_empty() {
                         return Err("finish called without an answer".into());
                     }
+                    let result = json!({ "ok": true, "answer": answer });
+                    self.input_items.push(function_output_item(call_id, &result));
                     return Ok(answer);
                 }
 
-                let result = self.call_tool(name, &args);
+                let result = if name == "wait_for_user_input" {
+                    self.wait_for_user_input(&args, user_input)?
+                } else {
+                    self.call_tool(name, &args)
+                };
                 self.log_tool_summary(name, &result);
                 self.logger.log_value("tool_result", &json!({
                     "tool": name,
-                    "arguments": args,
-                    "result": result,
+                    "arguments": args.clone(),
+                    "result": result.clone(),
                 }));
-                input_items.push(json!({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": result.to_string(),
-                }));
+                self.input_items.push(function_output_item(call_id, &result));
             }
         }
 
         Err(format!("Reached --max-steps ({max_steps}) before the model called finish").into())
     }
 
+    fn wait_for_user_input(&mut self, args: &Value, user_input: &mut UserInput) -> AppResult<Value> {
+        let question = args
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or("Please provide more information.");
+        let reason = args.get("reason").and_then(Value::as_str).unwrap_or("");
+        if reason.trim().is_empty() {
+            self.log(format!("model is waiting for user input: {question}"));
+        } else {
+            self.log(format!(
+                "model is waiting for user input: {question} (reason: {reason})"
+            ));
+        }
+
+        let messages = user_input.wait_for_messages();
+        if messages.is_empty() {
+            return Err("stdin closed while model was waiting for user input".into());
+        }
+        if messages.iter().any(|message| is_exit_input(message)) {
+            return Err("user requested exit".into());
+        }
+
+        Ok(json!({
+            "status": "received",
+            "messages": messages,
+        }))
+    }
+
     fn log_tool_summary(&mut self, name: &str, result: &Value) {
         let mut parts = Vec::new();
-        for key in ["total_matches", "returned", "cursor_index", "entry_count", "offset", "limit"] {
+        for key in [
+            "status",
+            "total_matches",
+            "returned",
+            "cursor_index",
+            "entry_count",
+            "offset",
+            "limit",
+        ] {
             if let Some(value) = result.get(key) {
                 parts.push(format!("{key}={value}"));
             }
         }
         if let Some(entries) = result.get("entries").and_then(Value::as_array) {
             parts.push(format!("entries={}", entries.len()));
+        }
+        if let Some(messages) = result.get("messages").and_then(Value::as_array) {
+            parts.push(format!("messages={}", messages.len()));
         }
         if result.get("error").is_some() {
             parts.push(format!("error={}", result["error"]));
@@ -588,7 +754,7 @@ impl Harness {
 
     fn instructions(&self) -> String {
         format!(
-            "You are an analysis harness for a personal QuickLogger log corpus. There are {} parsed entries. Prefer targeted tool calls over asking to dump everything. Use get_log_summary first unless the goal already names an exact date or search term. Maintain concise notes as you learn facts. Use get_log_entries_for_day for daily questions, search_log_entries for keywords, get_log_entries_around for context, and previous/next actions for local navigation. Finish with a direct answer and mention uncertainty or missing evidence when relevant.",
+            "You are an analysis harness for a personal QuickLogger log corpus. There are {} parsed entries. Prefer targeted tool calls over asking to dump everything. Use get_log_summary first unless the goal already names an exact date or search term. Maintain concise notes as you learn facts. Use get_log_entries_for_day for daily questions, search_log_entries for keywords, get_log_entries_around for context, and previous/next actions for local navigation. If the user's goal is too vague or you need clarification, call wait_for_user_input with a concise question instead of guessing. Finish with a direct answer and mention uncertainty or missing evidence when relevant.",
             self.entries.len()
         )
     }
@@ -716,8 +882,22 @@ impl Harness {
             }),
             json!({
                 "type": "function",
+                "name": "wait_for_user_input",
+                "description": "Pause the harness and wait for the user to type more information. Use when the goal is too vague, ambiguous, or missing needed context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "A concise question to show the user while waiting." },
+                        "reason": { "type": "string", "description": "Optional short reason why more input is needed." }
+                    },
+                    "required": ["question"],
+                    "additionalProperties": false
+                }
+            }),
+            json!({
+                "type": "function",
                 "name": "finish",
-                "description": "Finish the run with a final answer to the original goal.",
+                "description": "Finish the current turn with a final answer to the original goal or follow-up.",
                 "parameters": {
                     "type": "object",
                     "properties": { "answer": { "type": "string" } },
@@ -986,6 +1166,37 @@ impl Harness {
     }
 }
 
+fn user_message_item(content: String) -> Value {
+    json!({
+        "role": "user",
+        "content": content,
+    })
+}
+
+fn function_output_item(call_id: &str, result: &Value) -> Value {
+    json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": result.to_string(),
+    })
+}
+
+fn normalize_user_message(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn is_exit_input(message: &str) -> bool {
+    matches!(
+        message.trim().to_lowercase().as_str(),
+        "/quit" | "/exit" | ":q" | "quit" | "exit"
+    )
+}
+
 fn is_retryable_rate_limit(status: StatusCode, response_text: &str) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS
         && (extract_openai_error_code(response_text).as_deref() == Some("rate_limit_exceeded")
@@ -1003,11 +1214,17 @@ fn retry_delay(
     attempt: usize,
 ) -> (Duration, &'static str) {
     if let Some(delay) = retry_after_header {
-        return (cap_retry_delay(delay + Duration::from_millis(250)), "Retry-After header");
+        return (
+            cap_retry_delay(delay + Duration::from_millis(250)),
+            "Retry-After header",
+        );
     }
 
     if let Some(delay) = parse_retry_delay_from_error_message(response_text) {
-        return (cap_retry_delay(delay + Duration::from_millis(250)), "OpenAI error message");
+        return (
+            cap_retry_delay(delay + Duration::from_millis(250)),
+            "OpenAI error message",
+        );
     }
 
     let power = attempt.min(6) as u32;
