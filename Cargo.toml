@@ -2,6 +2,15 @@
 name = "rust_quicklog"
 version = "0.1.0"
 edition = "2021"
+autobins = false
+
+[[bin]]
+name = "rust_quicklog"
+path = "src/main.rs"
+
+[[bin]]
+name = "log_llm"
+path = "src/bin/log_llm_resilient.rs"
 
 [dependencies]
 chrono = "0.4.39"
