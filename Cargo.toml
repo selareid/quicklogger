@@ -3,6 +3,7 @@ name = "rust_quicklog"
 version = "0.1.0"
 edition = "2021"
 autobins = false
+default-run = "rust_quicklog"
 
 [[bin]]
 name = "rust_quicklog"
