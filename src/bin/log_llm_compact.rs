@@ -38,15 +38,16 @@ fn main() -> AppResult<()> {
 
     let client = OpenAiClient::new(api_key)?;
     let resume_path = cfg.resume_path()?;
-    let mut h = if let Some(path) = resume_path {
-        Harness::resume(entries, log, &path)?
+    let resumed = resume_path.is_some();
+    let mut h = if let Some(path) = resume_path.as_deref() {
+        Harness::resume(entries, log, path)?
     } else {
         let mut h = Harness::new(entries, log);
         let goal = cfg.goal.as_deref().ok_or("Pass a goal with --goal \"...\" or use --resume/--resume-latest")?;
         h.push_user(format!("Goal: {goal}\n\nUse log_action to inspect QuickLogger logs. Keep notes concise. Prefer small targeted pages. If the goal is unclear, use action=wait. When done, use action=finish."));
         h
     };
-    if resume_path.is_some() {
+    if resumed {
         if let Some(goal) = cfg.goal.as_deref() { h.add_user_messages("Resume user input", vec![goal.to_string()]); }
         h.save_session()?;
     }
@@ -131,7 +132,7 @@ struct Harness { entries: Vec<Entry>, cursor: Option<usize>, notes: String, summ
 impl Harness {
     fn new(entries: Vec<Entry>, log: RunLog) -> Self { Self { entries, cursor: None, notes: String::new(), summary: String::new(), log, input: Vec::new() } }
     fn resume(entries: Vec<Entry>, log: RunLog, path: &Path) -> AppResult<Self> { let value: Value = serde_json::from_str(&fs::read_to_string(path)?)?; let mut h = Self::new(entries, log); h.notes = value.get("notes").and_then(Value::as_str).unwrap_or("").to_string(); h.summary = value.get("summary").and_then(Value::as_str).unwrap_or("").to_string(); h.cursor = value.get("cursor").and_then(Value::as_u64).map(|v| v as usize); h.input = value.get("input").and_then(Value::as_array).cloned().unwrap_or_default(); h.log(format!("resumed session from {} with {} input item(s)", path.display(), h.input.len())); h.sanitize_function_pairs(); h.log(format!("new resumed-session snapshot path: {}", h.log.session_path.display())); Ok(h) }
-    fn save_session(&mut self) -> AppResult<()> { self.sanitize_function_pairs(); let value = json!({"version":1,"saved_at_utc":Utc::now().to_rfc3339(),"notes":self.notes,"summary":self.summary,"cursor":self.cursor,"input":self.input}); fs::write(&self.log.session_path, serde_json::to_string_pretty(&value)?)?; self.log(format!("saved session snapshot: {}", self.log.session_path.display())); Ok(()) }
+    fn save_session(&mut self) -> AppResult<()> { self.sanitize_function_pairs(); let value = json!({"version":1,"saved_at_utc":Utc::now().to_rfc3339(),"notes":self.notes.clone(),"summary":self.summary.clone(),"cursor":self.cursor,"input":self.input.clone()}); fs::write(&self.log.session_path, serde_json::to_string_pretty(&value)?)?; self.log(format!("saved session snapshot: {}", self.log.session_path.display())); Ok(()) }
     fn log(&mut self, msg: impl AsRef<str>) { self.log.line(msg); }
     fn push_user(&mut self, content: String) { self.input.push(json!({"role":"user","content":content})); }
     fn add_user_messages(&mut self, label: &str, messages: Vec<String>) { for m in messages { self.log(format!("queued user message: {}", trunc(&m, 500))); self.push_user(format!("{label}:\n{m}")); } }
