@@ -14,6 +14,12 @@ Run the LLM harness with the best low-latency general-purpose model:
 OPENAI_API_KEY=sk-... cargo run --bin log_llm -- --model gpt-5.4-mini --goal "summarise what I logged yesterday"
 ```
 
+Processing tier:
+
+- The harness sends `service_tier: "flex"` on every OpenAI Responses API request.
+- This prioritizes cheaper flex processing over low latency.
+- The selected tier is printed in the startup progress output and included in each full request payload in `./llm_logs`.
+
 Normal runs print lightweight progress to stderr while they run. You will see setup details, parsed log count, step `N/max`, tool names, compact tool-result counts, retry waits, and the final log path. Full API payloads are not printed to the terminal.
 
 Interactive input:
