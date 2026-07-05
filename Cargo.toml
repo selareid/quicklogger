@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "log_llm"
-path = "src/bin/log_llm_resilient.rs"
+path = "src/bin/log_llm_compact.rs"
 
 [dependencies]
 chrono = "0.4.39"
