@@ -8,10 +8,10 @@ It does not change the existing web server entry point. The server still runs wi
 cargo run
 ```
 
-Run the LLM harness with:
+Run the LLM harness with the best low-latency general-purpose model:
 
 ```bash
-OPENAI_API_KEY=sk-... cargo run --bin log_llm -- --goal "summarise what I logged yesterday"
+OPENAI_API_KEY=sk-... cargo run --bin log_llm -- --model gpt-5.4-mini --goal "summarise what I logged yesterday"
 ```
 
 Optional flags:
@@ -19,7 +19,7 @@ Optional flags:
 ```bash
 cargo run --bin log_llm -- \
   --logs ./logs \
-  --model gpt-5.5 \
+  --model gpt-5.4-mini \
   --max-steps 30 \
   --goal "find any entries about bike tyres and summarise the context"
 ```
@@ -27,7 +27,7 @@ cargo run --bin log_llm -- \
 Environment variables:
 
 - `OPENAI_API_KEY`: required.
-- `OPENAI_MODEL`: optional model override. Defaults to `gpt-5.5`.
+- `OPENAI_MODEL`: optional model override. Use `gpt-5.4-mini` for the strongest low-latency option.
 - `QUICKLOGGER_LOGS_PATH`: optional logs directory override. Defaults to `./logs`.
 
 The harness parses the existing `./logs` files, then lets the model inspect them through explicit actions rather than dumping the whole log corpus into one prompt.
