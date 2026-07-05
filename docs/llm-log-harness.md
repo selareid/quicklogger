@@ -18,7 +18,8 @@ Processing tier:
 
 - The harness sends `service_tier: "flex"` on every OpenAI Responses API request.
 - This prioritizes cheaper flex processing over low latency.
-- The selected tier is printed in the startup progress output and included in each full request payload in `./llm_logs`.
+- The HTTP client timeout is 900 seconds, matching OpenAI's Flex guidance for longer-running work.
+- The selected tier, timeout, and retry count are printed in startup progress output and included in full request/run logs.
 
 Normal runs print lightweight progress to stderr while they run. You will see setup details, parsed log count, step `N/max`, tool names, compact tool-result counts, retry waits, and the final log path. Full API payloads are not printed to the terminal.
 
@@ -27,7 +28,10 @@ Interactive input:
 - You can type extra messages at any time while the harness is running.
 - Messages typed during API/model/tool work are queued and inserted before the next model request.
 - After each answer, the harness stays open and waits for follow-up input.
-- Type a follow-up and press Enter to continue the same conversation.
+- If a run errors after retries, the harness pauses instead of exiting.
+- Type `/continue` to retry from the current conversation/tool state.
+- Type `/continue more context here` to add context and retry.
+- Type a normal follow-up and press Enter to continue the same conversation.
 - Type `/quit`, `/exit`, `:q`, `quit`, or `exit` to stop.
 - Blank lines are ignored.
 
@@ -39,9 +43,13 @@ Every run writes a full debug log under `./llm_logs`, even without `--verbose`. 
 
 The log files can contain private QuickLogger entries and model responses. The `llm_logs/.gitignore` file keeps generated `.log` files out of git.
 
-Rate-limit handling:
+Retry handling:
 
+- Flex transport timeouts and connection errors are retried automatically.
+- HTTP `408 Request Timeout` errors are retried automatically.
 - OpenAI `rate_limit_exceeded` errors are retried automatically.
+- Flex `429 Resource Unavailable` / insufficient-resource style errors are retried automatically.
+- Transient server errors are retried automatically.
 - The harness first uses the `Retry-After` header when OpenAI sends one.
 - If there is no header, it parses messages like `Please try again in 4.991s`.
 - If neither is available, it uses exponential backoff, capped at 60 seconds.
