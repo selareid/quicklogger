@@ -11,10 +11,11 @@ use std::{
 };
 
 const DEFAULT_LOGS_PATH: &str = "./logs";
-const DEFAULT_MODEL: &str = "gpt-5.5";
+const DEFAULT_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_MAX_STEPS: usize = 30;
 const MAX_ENTRY_CHARS: usize = 1_500;
 const MAX_RESULT_ENTRIES: usize = 100;
+const VERBOSE_VALUE_CHARS: usize = 2_000;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -22,6 +23,13 @@ fn main() -> AppResult<()> {
     let config = Config::from_args()?;
     let api_key = env::var("OPENAI_API_KEY")
         .map_err(|_| "OPENAI_API_KEY must be set to use the log LLM harness")?;
+
+    if config.verbose {
+        eprintln!("[log-llm] logs path: {}", config.logs_path.display());
+        eprintln!("[log-llm] model: {}", config.model);
+        eprintln!("[log-llm] max steps: {}", config.max_steps);
+        eprintln!("[log-llm] goal: {}", config.goal);
+    }
 
     let entries = load_log_entries(&config.logs_path)?;
     if entries.is_empty() {
@@ -32,8 +40,25 @@ fn main() -> AppResult<()> {
         .into());
     }
 
+    if config.verbose {
+        let first_date = entries
+            .first()
+            .map(|entry| entry.date_utc.as_str())
+            .unwrap_or("unknown");
+        let last_date = entries
+            .last()
+            .map(|entry| entry.date_utc.as_str())
+            .unwrap_or("unknown");
+        eprintln!(
+            "[log-llm] loaded {} parsed entries, date range {} to {}",
+            entries.len(),
+            first_date,
+            last_date
+        );
+    }
+
     let client = OpenAiClient::new(api_key)?;
-    let mut harness = Harness::new(entries);
+    let mut harness = Harness::new(entries, config.verbose);
     let answer = harness.run(&client, &config.goal, &config.model, config.max_steps)?;
 
     println!("\n=== Answer ===\n{answer}");
@@ -47,6 +72,7 @@ struct Config {
     logs_path: PathBuf,
     model: String,
     max_steps: usize,
+    verbose: bool,
 }
 
 impl Config {
@@ -57,6 +83,7 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_LOGS_PATH));
         let mut model = env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let mut max_steps = DEFAULT_MAX_STEPS;
+        let mut verbose = false;
         let mut positional_goal = Vec::new();
 
         let mut args = env::args().skip(1).peekable();
@@ -68,6 +95,7 @@ impl Config {
                 "--max-steps" => {
                     max_steps = next_arg(&mut args, "--max-steps")?.parse()?;
                 }
+                "--verbose" | "-v" => verbose = true,
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -91,6 +119,7 @@ impl Config {
             logs_path,
             model,
             max_steps,
+            verbose,
         })
     }
 }
@@ -105,7 +134,7 @@ fn next_arg(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.5] [--max-steps 30]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory"
+        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory"
     );
 }
 
@@ -242,14 +271,16 @@ struct Harness {
     entries: Vec<LogEntry>,
     cursor_index: Option<usize>,
     notes: String,
+    verbose: bool,
 }
 
 impl Harness {
-    fn new(entries: Vec<LogEntry>) -> Self {
+    fn new(entries: Vec<LogEntry>, verbose: bool) -> Self {
         Self {
             entries,
             cursor_index: None,
             notes: String::new(),
+            verbose,
         }
     }
 
@@ -268,6 +299,13 @@ impl Harness {
         })];
 
         for step in 0..max_steps {
+            self.verbose_log(format!(
+                "step {}/{}: sending model request with {} conversation item(s)",
+                step + 1,
+                max_steps,
+                input_items.len()
+            ));
+
             let request_body = json!({
                 "model": model,
                 "input": input_items,
@@ -291,12 +329,26 @@ impl Harness {
                 }
             }
 
+            self.verbose_log(format!(
+                "step {}/{}: model returned {} output item(s), {} tool call(s)",
+                step + 1,
+                max_steps,
+                output.len(),
+                tool_calls.len()
+            ));
+
             for item in output {
                 input_items.push(item);
             }
 
             if tool_calls.is_empty() {
                 let text = extract_output_text(&response);
+                self.verbose_log(format!(
+                    "step {}/{}: model produced final text directly ({} chars)",
+                    step + 1,
+                    max_steps,
+                    text.chars().count()
+                ));
                 if text.trim().is_empty() {
                     return Err(format!("Model stopped without output after step {step}").into());
                 }
@@ -318,6 +370,8 @@ impl Harness {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
 
+                self.verbose_log(format!("tool call: {name}({arguments})"));
+
                 if name == "finish" {
                     let answer = args
                         .get("answer")
@@ -325,6 +379,7 @@ impl Harness {
                         .unwrap_or("")
                         .trim()
                         .to_string();
+                    self.verbose_log(format!("finish called with {} answer chars", answer.chars().count()));
                     if answer.is_empty() {
                         return Err("finish called without an answer".into());
                     }
@@ -332,6 +387,10 @@ impl Harness {
                 }
 
                 let result = self.call_tool(name, &args);
+                self.verbose_log(format!(
+                    "tool result: {}",
+                    compact_json(&result, VERBOSE_VALUE_CHARS)
+                ));
                 input_items.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -341,6 +400,12 @@ impl Harness {
         }
 
         Err(format!("Reached --max-steps ({max_steps}) before the model called finish").into())
+    }
+
+    fn verbose_log(&self, message: impl AsRef<str>) {
+        if self.verbose {
+            eprintln!("[log-llm] {}", message.as_ref());
+        }
     }
 
     fn instructions(&self) -> String {
@@ -495,7 +560,7 @@ impl Harness {
             "get_log_entries_between" => self.get_log_entries_between(args),
             "search_log_entries" => self.search_log_entries(args),
             "get_log_entries_around" => self.get_log_entries_around(args),
-            "read_notes" => json!({ "notes": self.notes }),
+            "read_notes" => json!({ "notes": self.notes.clone() }),
             "write_notes" => self.write_notes(args),
             other => json!({ "error": format!("unknown tool: {other}") }),
         }
@@ -721,7 +786,7 @@ impl Harness {
             _ => return json!({ "error": "mode must be append or replace" }),
         }
 
-        json!({ "ok": true, "notes": self.notes })
+        json!({ "ok": true, "notes": self.notes.clone() })
     }
 
     fn entry_json(&self, entry: &LogEntry) -> Value {
@@ -791,6 +856,11 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn compact_json(value: &Value, max_chars: usize) -> String {
+    let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    truncate_chars(&text, max_chars)
 }
 
 fn parse_media_fields(body: &str) -> Option<Value> {
