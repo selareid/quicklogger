@@ -1,5 +1,9 @@
 use chrono::{Datelike, LocalResult, NaiveDate, TimeZone, Utc};
-use reqwest::blocking::Client;
+use reqwest::{
+    blocking::Client,
+    header::RETRY_AFTER,
+    StatusCode,
+};
 use serde_json::{json, Value};
 use std::{
     cmp::min,
@@ -8,6 +12,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    thread,
     time::Duration,
 };
 
@@ -18,6 +23,8 @@ const LLM_LOGS_PATH: &str = "./llm_logs";
 const MAX_ENTRY_CHARS: usize = 1_500;
 const MAX_RESULT_ENTRIES: usize = 100;
 const VERBOSE_VALUE_CHARS: usize = 2_000;
+const MAX_RATE_LIMIT_RETRIES: usize = 8;
+const MAX_RATE_LIMIT_BACKOFF_SECS: u64 = 60;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
@@ -166,7 +173,7 @@ fn next_arg(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nRun logs:\n  Full run logs are always written under ./llm_logs. Use --verbose to also echo progress to stderr."
+        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nRun logs:\n  Full run logs are always written under ./llm_logs. Use --verbose to also echo progress to stderr.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
     );
 }
 
@@ -343,21 +350,68 @@ impl OpenAiClient {
         })
     }
 
-    fn create_response(&self, request_body: Value) -> AppResult<Value> {
-        let response = self
-            .http
-            .post("https://api.openai.com/v1/responses")
-            .bearer_auth(&self.api_key)
-            .json(&request_body)
-            .send()?;
+    fn create_response(&self, request_body: &Value, logger: &mut RunLogger) -> AppResult<Value> {
+        for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
+            let response = self
+                .http
+                .post("https://api.openai.com/v1/responses")
+                .bearer_auth(&self.api_key)
+                .json(request_body)
+                .send()?;
 
-        let status = response.status();
-        let text = response.text()?;
-        if !status.is_success() {
+            let status = response.status();
+            let retry_after_header = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after_header);
+            let text = response.text()?;
+
+            if status.is_success() {
+                if attempt > 0 {
+                    logger.log(format!(
+                        "OpenAI request succeeded after {} rate-limit retry attempt(s)",
+                        attempt
+                    ));
+                }
+                return Ok(serde_json::from_str(&text)?);
+            }
+
+            let error_body = parse_error_body(&text);
+            logger.log_value(
+                "openai_error",
+                &json!({
+                    "status": status.as_u16(),
+                    "attempt": attempt + 1,
+                    "max_attempts": MAX_RATE_LIMIT_RETRIES + 1,
+                    "body": error_body,
+                }),
+            );
+
+            if is_retryable_rate_limit(status, &text) && attempt < MAX_RATE_LIMIT_RETRIES {
+                let (delay, source) = retry_delay(retry_after_header, &text, attempt);
+                logger.log(format!(
+                    "rate_limit_exceeded: retrying OpenAI request in {:.3}s using {} (attempt {}/{})",
+                    delay.as_secs_f64(),
+                    source,
+                    attempt + 1,
+                    MAX_RATE_LIMIT_RETRIES
+                ));
+                thread::sleep(delay);
+                continue;
+            }
+
+            if is_retryable_rate_limit(status, &text) {
+                logger.log(format!(
+                    "rate_limit_exceeded: exhausted {} retry attempt(s)",
+                    MAX_RATE_LIMIT_RETRIES
+                ));
+            }
+
             return Err(format!("OpenAI API error {status}: {text}").into());
         }
 
-        Ok(serde_json::from_str(&text)?)
+        Err("OpenAI API request failed after retry loop".into())
     }
 }
 
@@ -418,7 +472,7 @@ impl Harness {
             });
             self.logger.log_value("openai_request", &request_body);
 
-            let response = client.create_response(request_body)?;
+            let response = client.create_response(&request_body, &mut self.logger)?;
             self.logger.log_value("openai_response", &response);
             let output = response
                 .get("output")
@@ -908,6 +962,94 @@ impl Harness {
 
         value
     }
+}
+
+fn is_retryable_rate_limit(status: StatusCode, response_text: &str) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS
+        && (extract_openai_error_code(response_text).as_deref() == Some("rate_limit_exceeded")
+            || response_text.contains("Rate limit reached"))
+}
+
+fn parse_retry_after_header(value: &str) -> Option<Duration> {
+    let seconds = value.trim().parse::<f64>().ok()?;
+    seconds_to_duration(seconds)
+}
+
+fn retry_delay(
+    retry_after_header: Option<Duration>,
+    response_text: &str,
+    attempt: usize,
+) -> (Duration, &'static str) {
+    if let Some(delay) = retry_after_header {
+        return (cap_retry_delay(delay + Duration::from_millis(250)), "Retry-After header");
+    }
+
+    if let Some(delay) = parse_retry_delay_from_error_message(response_text) {
+        return (cap_retry_delay(delay + Duration::from_millis(250)), "OpenAI error message");
+    }
+
+    let power = attempt.min(6) as u32;
+    let fallback = Duration::from_secs(2_u64.pow(power));
+    (cap_retry_delay(fallback), "exponential fallback")
+}
+
+fn parse_retry_delay_from_error_message(response_text: &str) -> Option<Duration> {
+    let lower = response_text.to_lowercase();
+    let marker = "try again in ";
+    let marker_start = lower.find(marker)? + marker.len();
+    let rest = &response_text[marker_start..];
+    let trimmed = rest.trim_start();
+
+    let mut number = String::new();
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    if number.is_empty() {
+        return None;
+    }
+
+    let value = number.parse::<f64>().ok()?;
+    let unit_rest = trimmed[number.len()..].trim_start().to_lowercase();
+    if unit_rest.starts_with("ms") || unit_rest.starts_with("millisecond") {
+        seconds_to_duration(value / 1_000.0)
+    } else {
+        seconds_to_duration(value)
+    }
+}
+
+fn seconds_to_duration(seconds: f64) -> Option<Duration> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    Some(Duration::from_secs_f64(seconds))
+}
+
+fn cap_retry_delay(delay: Duration) -> Duration {
+    let max = Duration::from_secs(MAX_RATE_LIMIT_BACKOFF_SECS);
+    if delay > max {
+        max
+    } else {
+        delay
+    }
+}
+
+fn extract_openai_error_code(response_text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(response_text)
+        .ok()?
+        .get("error")?
+        .get("code")?
+        .as_str()
+        .map(ToString::to_string)
+}
+
+fn parse_error_body(response_text: &str) -> Value {
+    serde_json::from_str::<Value>(response_text)
+        .unwrap_or_else(|_| json!({ "raw": response_text }))
 }
 
 fn extract_output_text(response: &Value) -> String {
