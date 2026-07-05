@@ -18,6 +18,15 @@ Every run writes a full debug log under `./llm_logs`, even without `--verbose`. 
 
 The log files can contain private QuickLogger entries and model responses. The `llm_logs/.gitignore` file keeps generated `.log` files out of git.
 
+Rate-limit handling:
+
+- OpenAI `rate_limit_exceeded` errors are retried automatically.
+- The harness first uses the `Retry-After` header when OpenAI sends one.
+- If there is no header, it parses messages like `Please try again in 4.991s`.
+- If neither is available, it uses exponential backoff, capped at 60 seconds.
+- Retries are logged into `./llm_logs` with the chosen delay and source.
+- `insufficient_quota` is not retried, because waiting will not fix missing quota or billing limits.
+
 To also see progress in the terminal while it runs, add `--verbose` or `-v`:
 
 ```bash
@@ -26,7 +35,7 @@ OPENAI_API_KEY=sk-... cargo run --bin log_llm -- \
   --goal "summarise what I logged yesterday"
 ```
 
-Verbose mode prints progress to stderr, including the selected model, parsed log count, each model step, tool calls, parsed arguments, and truncated tool results. The file in `llm_logs` still contains the full request/response payloads.
+Verbose mode prints progress to stderr, including the selected model, parsed log count, each model step, tool calls, parsed arguments, truncated tool results, and rate-limit retry messages. The file in `llm_logs` still contains the full request/response/error payloads.
 
 Optional flags:
 
