@@ -6,6 +6,7 @@ use std::{
     env,
     error::Error,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -13,6 +14,7 @@ use std::{
 const DEFAULT_LOGS_PATH: &str = "./logs";
 const DEFAULT_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_MAX_STEPS: usize = 30;
+const LLM_LOGS_PATH: &str = "./llm_logs";
 const MAX_ENTRY_CHARS: usize = 1_500;
 const MAX_RESULT_ENTRIES: usize = 100;
 const VERBOSE_VALUE_CHARS: usize = 2_000;
@@ -21,18 +23,39 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 fn main() -> AppResult<()> {
     let config = Config::from_args()?;
-    let api_key = env::var("OPENAI_API_KEY")
-        .map_err(|_| "OPENAI_API_KEY must be set to use the log LLM harness")?;
+    let mut run_logger = RunLogger::new(config.verbose)?;
+    let run_log_path = run_logger.path().display().to_string();
 
-    if config.verbose {
-        eprintln!("[log-llm] logs path: {}", config.logs_path.display());
-        eprintln!("[log-llm] model: {}", config.model);
-        eprintln!("[log-llm] max steps: {}", config.max_steps);
-        eprintln!("[log-llm] goal: {}", config.goal);
-    }
+    run_logger.log(format!("run log path: {run_log_path}"));
+    run_logger.log(format!("logs path: {}", config.logs_path.display()));
+    run_logger.log(format!("model: {}", config.model));
+    run_logger.log(format!("max steps: {}", config.max_steps));
+    run_logger.log(format!("goal: {}", config.goal));
 
-    let entries = load_log_entries(&config.logs_path)?;
+    let api_key = match env::var("OPENAI_API_KEY") {
+        Ok(api_key) => {
+            run_logger.log("OPENAI_API_KEY is set");
+            api_key
+        }
+        Err(_) => {
+            run_logger.log("OPENAI_API_KEY is missing");
+            return Err("OPENAI_API_KEY must be set to use the log LLM harness".into());
+        }
+    };
+
+    let entries = match load_log_entries(&config.logs_path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            run_logger.log(format!("failed to load log entries: {error}"));
+            return Err(error);
+        }
+    };
+
     if entries.is_empty() {
+        run_logger.log(format!(
+            "no log entries found under {}",
+            config.logs_path.display()
+        ));
         return Err(format!(
             "No log entries found under {}",
             config.logs_path.display()
@@ -40,29 +63,38 @@ fn main() -> AppResult<()> {
         .into());
     }
 
-    if config.verbose {
-        let first_date = entries
-            .first()
-            .map(|entry| entry.date_utc.as_str())
-            .unwrap_or("unknown");
-        let last_date = entries
-            .last()
-            .map(|entry| entry.date_utc.as_str())
-            .unwrap_or("unknown");
-        eprintln!(
-            "[log-llm] loaded {} parsed entries, date range {} to {}",
-            entries.len(),
-            first_date,
-            last_date
-        );
-    }
+    let first_date = entries
+        .first()
+        .map(|entry| entry.date_utc.as_str())
+        .unwrap_or("unknown");
+    let last_date = entries
+        .last()
+        .map(|entry| entry.date_utc.as_str())
+        .unwrap_or("unknown");
+    run_logger.log(format!(
+        "loaded {} parsed entries, date range {} to {}",
+        entries.len(),
+        first_date,
+        last_date
+    ));
 
     let client = OpenAiClient::new(api_key)?;
-    let mut harness = Harness::new(entries, config.verbose);
-    let answer = harness.run(&client, &config.goal, &config.model, config.max_steps)?;
+    let mut harness = Harness::new(entries, run_logger);
+    let answer = match harness.run(&client, &config.goal, &config.model, config.max_steps) {
+        Ok(answer) => answer,
+        Err(error) => {
+            harness.log(format!("run failed: {error}"));
+            eprintln!("LLM run log: {}", harness.log_path().display());
+            return Err(error);
+        }
+    };
+
+    harness.log("run finished successfully");
+    let run_log_path = harness.log_path().display().to_string();
 
     println!("\n=== Answer ===\n{answer}");
     println!("\n=== Notes ===\n{}", harness.notes.trim());
+    println!("\n=== LLM Run Log ===\n{run_log_path}");
 
     Ok(())
 }
@@ -134,8 +166,70 @@ fn next_arg(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory"
+        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nRun logs:\n  Full run logs are always written under ./llm_logs. Use --verbose to also echo progress to stderr."
     );
+}
+
+struct RunLogger {
+    path: PathBuf,
+    file: fs::File,
+    echo_to_stderr: bool,
+}
+
+impl RunLogger {
+    fn new(echo_to_stderr: bool) -> AppResult<Self> {
+        fs::create_dir_all(LLM_LOGS_PATH)?;
+        let started_at = Utc::now();
+        let filename = format!(
+            "{}_{}.log",
+            started_at.format("%Y%m%dT%H%M%SZ"),
+            std::process::id()
+        );
+        let path = Path::new(LLM_LOGS_PATH).join(filename);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+
+        writeln!(file, "# QuickLogger LLM harness run")?;
+        writeln!(file, "started_at_utc: {}", started_at.to_rfc3339())?;
+        writeln!(file, "pid: {}", std::process::id())?;
+        writeln!(file, "---")?;
+        file.flush()?;
+
+        Ok(Self {
+            path,
+            file,
+            echo_to_stderr,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn log(&mut self, message: impl AsRef<str>) {
+        let message = message.as_ref();
+        if self.echo_to_stderr {
+            eprintln!("[log-llm] {message}");
+        }
+        let _ = writeln!(self.file, "[{}] {message}", Utc::now().to_rfc3339());
+        let _ = self.file.flush();
+    }
+
+    fn log_value(&mut self, label: &str, value: &Value) {
+        let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+        if self.echo_to_stderr {
+            eprintln!(
+                "[log-llm] {label}: {}",
+                truncate_chars(&text, VERBOSE_VALUE_CHARS)
+            );
+        }
+        let _ = writeln!(self.file, "[{}] {label}:", Utc::now().to_rfc3339());
+        let _ = writeln!(self.file, "{text}");
+        let _ = writeln!(self.file, "---");
+        let _ = self.file.flush();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -271,17 +365,25 @@ struct Harness {
     entries: Vec<LogEntry>,
     cursor_index: Option<usize>,
     notes: String,
-    verbose: bool,
+    logger: RunLogger,
 }
 
 impl Harness {
-    fn new(entries: Vec<LogEntry>, verbose: bool) -> Self {
+    fn new(entries: Vec<LogEntry>, logger: RunLogger) -> Self {
         Self {
             entries,
             cursor_index: None,
             notes: String::new(),
-            verbose,
+            logger,
         }
+    }
+
+    fn log_path(&self) -> &Path {
+        self.logger.path()
+    }
+
+    fn log(&mut self, message: impl AsRef<str>) {
+        self.logger.log(message);
     }
 
     fn run(
@@ -299,7 +401,7 @@ impl Harness {
         })];
 
         for step in 0..max_steps {
-            self.verbose_log(format!(
+            self.log(format!(
                 "step {}/{}: sending model request with {} conversation item(s)",
                 step + 1,
                 max_steps,
@@ -314,8 +416,10 @@ impl Harness {
                 "parallel_tool_calls": false,
                 "store": false,
             });
+            self.logger.log_value("openai_request", &request_body);
 
             let response = client.create_response(request_body)?;
+            self.logger.log_value("openai_response", &response);
             let output = response
                 .get("output")
                 .and_then(Value::as_array)
@@ -329,7 +433,7 @@ impl Harness {
                 }
             }
 
-            self.verbose_log(format!(
+            self.log(format!(
                 "step {}/{}: model returned {} output item(s), {} tool call(s)",
                 step + 1,
                 max_steps,
@@ -343,7 +447,7 @@ impl Harness {
 
             if tool_calls.is_empty() {
                 let text = extract_output_text(&response);
-                self.verbose_log(format!(
+                self.log(format!(
                     "step {}/{}: model produced final text directly ({} chars)",
                     step + 1,
                     max_steps,
@@ -370,7 +474,7 @@ impl Harness {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
 
-                self.verbose_log(format!("tool call: {name}({arguments})"));
+                self.log(format!("tool call: {name}({arguments})"));
 
                 if name == "finish" {
                     let answer = args
@@ -379,7 +483,10 @@ impl Harness {
                         .unwrap_or("")
                         .trim()
                         .to_string();
-                    self.verbose_log(format!("finish called with {} answer chars", answer.chars().count()));
+                    self.log(format!(
+                        "finish called with {} answer chars",
+                        answer.chars().count()
+                    ));
                     if answer.is_empty() {
                         return Err("finish called without an answer".into());
                     }
@@ -387,10 +494,11 @@ impl Harness {
                 }
 
                 let result = self.call_tool(name, &args);
-                self.verbose_log(format!(
-                    "tool result: {}",
-                    compact_json(&result, VERBOSE_VALUE_CHARS)
-                ));
+                self.logger.log_value("tool_result", &json!({
+                    "tool": name,
+                    "arguments": args,
+                    "result": result,
+                }));
                 input_items.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
@@ -400,12 +508,6 @@ impl Harness {
         }
 
         Err(format!("Reached --max-steps ({max_steps}) before the model called finish").into())
-    }
-
-    fn verbose_log(&self, message: impl AsRef<str>) {
-        if self.verbose {
-            eprintln!("[log-llm] {}", message.as_ref());
-        }
     }
 
     fn instructions(&self) -> String {
@@ -856,11 +958,6 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
-}
-
-fn compact_json(value: &Value, max_chars: usize) -> String {
-    let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-    truncate_chars(&text, max_chars)
 }
 
 fn parse_media_fields(body: &str) -> Option<Value> {
