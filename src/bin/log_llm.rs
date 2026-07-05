@@ -617,9 +617,7 @@ impl Harness {
                 tool_calls.len()
             ));
 
-            for item in output {
-                self.input_items.push(item);
-            }
+            self.push_model_output_items(&output);
 
             if tool_calls.is_empty() {
                 let text = extract_output_text(&response);
@@ -693,6 +691,38 @@ impl Harness {
         }
 
         Err(format!("Reached --max-steps ({max_steps}) before the model called finish").into())
+    }
+
+    fn push_model_output_items(&mut self, output: &[Value]) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("function_call") => {
+                    self.input_items.push(json!({
+                        "type": "function_call",
+                        "call_id": item.get("call_id").cloned().unwrap_or(Value::Null),
+                        "name": item.get("name").cloned().unwrap_or(Value::Null),
+                        "arguments": item.get("arguments").cloned().unwrap_or_else(|| json!("{}")),
+                    }));
+                }
+                Some("message") => {
+                    let text = extract_message_item_text(item);
+                    if !text.trim().is_empty() {
+                        self.input_items.push(assistant_message_item(text));
+                    }
+                }
+                Some("reasoning") => {
+                    self.log("skipped transient reasoning item in conversation history because store=false");
+                }
+                Some(other) => {
+                    self.log(format!(
+                        "skipped unsupported model output item type in conversation history: {other}"
+                    ));
+                }
+                None => {
+                    self.log("skipped model output item without a type");
+                }
+            }
+        }
     }
 
     fn wait_for_user_input(&mut self, args: &Value, user_input: &mut UserInput) -> AppResult<Value> {
@@ -1175,6 +1205,13 @@ fn user_message_item(content: String) -> Value {
     })
 }
 
+fn assistant_message_item(content: String) -> Value {
+    json!({
+        "role": "assistant",
+        "content": content,
+    })
+}
+
 fn function_output_item(call_id: &str, result: &Value) -> Value {
     json!({
         "type": "function_call_output",
@@ -1300,24 +1337,35 @@ fn extract_output_text(response: &Value) -> String {
     };
 
     for item in output {
-        if item.get("type").and_then(Value::as_str) != Some("message") {
-            continue;
-        }
-        let Some(content) = item.get("content").and_then(Value::as_array) else {
-            continue;
-        };
-        for content_item in content {
-            if content_item.get("type").and_then(Value::as_str) == Some("output_text") {
-                if let Some(part) = content_item.get("text").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str(part);
+        if item.get("type").and_then(Value::as_str) == Some("message") {
+            let part = extract_message_item_text(item);
+            if !part.is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
                 }
+                text.push_str(&part);
             }
         }
     }
 
+    text
+}
+
+fn extract_message_item_text(item: &Value) -> String {
+    let mut text = String::new();
+    let Some(content) = item.get("content").and_then(Value::as_array) else {
+        return text;
+    };
+    for content_item in content {
+        if content_item.get("type").and_then(Value::as_str) == Some("output_text") {
+            if let Some(part) = content_item.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(part);
+            }
+        }
+    }
     text
 }
 
