@@ -1,9 +1,5 @@
 use chrono::{Datelike, LocalResult, NaiveDate, TimeZone, Utc};
-use reqwest::{
-    blocking::Client,
-    header::RETRY_AFTER,
-    StatusCode,
-};
+use reqwest::{blocking::Client, header::RETRY_AFTER, StatusCode};
 use serde_json::{json, Value};
 use std::{
     cmp::min,
@@ -20,6 +16,7 @@ use std::{
 const DEFAULT_LOGS_PATH: &str = "./logs";
 const DEFAULT_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_MAX_STEPS: usize = 30;
+const OPENAI_SERVICE_TIER: &str = "flex";
 const LLM_LOGS_PATH: &str = "./llm_logs";
 const MAX_ENTRY_CHARS: usize = 1_500;
 const MAX_RESULT_ENTRIES: usize = 100;
@@ -39,6 +36,7 @@ fn main() -> AppResult<()> {
     run_logger.log(format!("run log path: {run_log_path}"));
     run_logger.log(format!("logs path: {}", config.logs_path.display()));
     run_logger.log(format!("model: {}", config.model));
+    run_logger.log(format!("service tier: {OPENAI_SERVICE_TIER}"));
     run_logger.log(format!("max steps: {}", config.max_steps));
     run_logger.log(format!("goal: {}", config.goal));
     run_logger.log("type extra messages at any time; they will be added before the next model request");
@@ -206,7 +204,7 @@ fn next_arg(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nInteractive input:\n  Type extra messages at any time while the harness is running. They are queued and added before the next model request. After each answer, the harness waits for a follow-up; type /quit to exit.\n\nConsole output:\n  Lightweight progress is printed while the harness runs. Use --verbose for compact tool-result/error snippets too. Full API payloads stay in ./llm_logs.\n\nRun logs:\n  Full run logs are always written under ./llm_logs.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
+        "Usage:\n  cargo run --bin log_llm -- --goal \"summarise my logs from yesterday\" [--logs ./logs] [--model gpt-5.4-mini] [--max-steps 30] [--verbose]\n\nEnvironment:\n  OPENAI_API_KEY          required\n  OPENAI_MODEL            optional default model\n  QUICKLOGGER_LOGS_PATH   optional default log directory\n\nProcessing tier:\n  Uses OpenAI service_tier=flex to prefer cheaper processing over latency.\n\nInteractive input:\n  Type extra messages at any time while the harness is running. They are queued and added before the next model request. After each answer, the harness waits for a follow-up; type /quit to exit.\n\nConsole output:\n  Lightweight progress is printed while the harness runs. Use --verbose for compact tool-result/error snippets too. Full API payloads stay in ./llm_logs.\n\nRun logs:\n  Full run logs are always written under ./llm_logs.\n\nRate limits:\n  rate_limit_exceeded errors are retried automatically with backoff."
     );
 }
 
@@ -588,6 +586,7 @@ impl Harness {
 
             let request_body = json!({
                 "model": model,
+                "service_tier": OPENAI_SERVICE_TIER,
                 "input": self.input_items.clone(),
                 "instructions": self.instructions(),
                 "tools": self.tools(),
@@ -670,7 +669,7 @@ impl Harness {
                     if answer.is_empty() {
                         return Err("finish called without an answer".into());
                     }
-                    let result = json!({ "ok": true, "answer": answer });
+                    let result = json!({ "ok": true, "answer": answer.clone() });
                     self.input_items.push(function_output_item(call_id, &result));
                     return Ok(answer);
                 }
@@ -681,11 +680,14 @@ impl Harness {
                     self.call_tool(name, &args)
                 };
                 self.log_tool_summary(name, &result);
-                self.logger.log_value("tool_result", &json!({
-                    "tool": name,
-                    "arguments": args.clone(),
-                    "result": result.clone(),
-                }));
+                self.logger.log_value(
+                    "tool_result",
+                    &json!({
+                        "tool": name,
+                        "arguments": args.clone(),
+                        "result": result.clone(),
+                    }),
+                );
                 self.input_items.push(function_output_item(call_id, &result));
             }
         }
