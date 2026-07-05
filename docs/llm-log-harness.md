@@ -33,6 +33,8 @@ Interactive input:
 
 The model also has a `wait_for_user_input` action. It can call this when the goal is vague, ambiguous, or missing needed context. When that happens, the harness pauses, shows the model's question in the terminal, waits for your typed reply, and sends that reply back as the action result.
 
+Conversation history is kept locally while still sending `store: false` to OpenAI. The harness does not re-send transient response item IDs from prior calls, because those items are not persisted when `store` is false. It keeps portable conversation items instead: user messages, assistant text, function calls, and function-call outputs.
+
 Every run writes a full debug log under `./llm_logs`, even without `--verbose`. The log file includes run metadata, parsed log count, each OpenAI request payload, each OpenAI response payload, tool calls, tool arguments, tool results, follow-up messages, and wait-for-user-input replies.
 
 The log files can contain private QuickLogger entries and model responses. The `llm_logs/.gitignore` file keeps generated `.log` files out of git.
