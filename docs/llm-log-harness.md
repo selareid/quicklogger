@@ -14,7 +14,11 @@ Run the LLM harness with the best low-latency general-purpose model:
 OPENAI_API_KEY=sk-... cargo run --bin log_llm -- --model gpt-5.4-mini --goal "summarise what I logged yesterday"
 ```
 
-To see what the harness is doing while it runs, add `--verbose` or `-v`:
+Every run writes a full debug log under `./llm_logs`, even without `--verbose`. The log file includes run metadata, parsed log count, each OpenAI request payload, each OpenAI response payload, tool calls, tool arguments, and tool results.
+
+The log files can contain private QuickLogger entries and model responses. The `llm_logs/.gitignore` file keeps generated `.log` files out of git.
+
+To also see progress in the terminal while it runs, add `--verbose` or `-v`:
 
 ```bash
 OPENAI_API_KEY=sk-... cargo run --bin log_llm -- \
@@ -22,7 +26,7 @@ OPENAI_API_KEY=sk-... cargo run --bin log_llm -- \
   --goal "summarise what I logged yesterday"
 ```
 
-Verbose mode prints progress to stderr, including the selected model, parsed log count, each model step, tool calls, parsed arguments, and truncated tool results.
+Verbose mode prints progress to stderr, including the selected model, parsed log count, each model step, tool calls, parsed arguments, and truncated tool results. The file in `llm_logs` still contains the full request/response payloads.
 
 Optional flags:
 
